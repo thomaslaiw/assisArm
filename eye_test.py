@@ -43,7 +43,17 @@ DIRECTIONS
     A confirm also drops the zone immediately, so the eyes have to leave and
     return before that direction can be spoken a second time.
 
-This build prints nothing to the console: everything is drawn on the preview.
+ARM HOOKS
+    Every confirmed event calls a method on an ArmActions instance:
+        on_left  on_right  on_up  on_down     a direction was confirmed
+        on_centre                             eyes came back to rest
+        on_fetch  on_stop  on_back            fetch mode changes
+        on_system_on  on_system_off           power toggle
+    Subclass ArmActions and pass it to main() to drive the real arm. The stock
+    class just prints, so a normal run shows what the arm would have done.
+    Nothing about the gaze logic changes when you wire the arm in.
+
+This build prints nothing to the console except the arm hooks.
 Use eye_test_verbose.py when the numbers are needed for tuning.
 
 Usage:
@@ -97,6 +107,60 @@ EAR_CLOSED = 0.090
 VIEW_W, VIEW_H = 1280, 720
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 FRAME_DIR = os.path.join(PROJECT_DIR, "saved_frames")
+
+
+# ---------------------------------------------------------------- arm hooks
+class ArmActions:
+    """
+    Every hook the robotic arm needs. Subclass this, or replace the instance
+    passed to main(), and the arm code plugs in without touching the gaze
+    logic. Each hook is called exactly once per event.
+
+        on_left / on_right / on_up / on_down   a direction was confirmed
+        on_centre                              the eyes came back to rest
+        on_fetch / on_stop / on_back           fetch mode changes
+        on_system_on / on_system_off           power toggle
+
+    The defaults only print, so a stock run tells you what the arm would do.
+    """
+
+    def on_left(self):
+        print("[arm] LEFT")
+
+    def on_right(self):
+        print("[arm] RIGHT")
+
+    def on_up(self):
+        print("[arm] UP")
+
+    def on_down(self):
+        print("[arm] DOWN")
+
+    def on_centre(self):
+        print("[arm] CENTRE")
+
+    def on_fetch(self):
+        print("[arm] FETCH - arm taking control")
+
+    def on_stop(self):
+        print("[arm] STOP - arm holding still")
+
+    def on_back(self):
+        print("[arm] BACK - arm returning home")
+
+    def on_system_on(self):
+        print("[arm] SYSTEM ON")
+
+    def on_system_off(self):
+        print("[arm] SYSTEM OFF")
+
+
+DIRECTION_HOOKS = {
+    "left": "on_left",
+    "right": "on_right",
+    "up": "on_up",
+    "down": "on_down",
+}
 
 # ---------------------------------------------------------------- speech
 _PS_SPEAK = (
@@ -469,8 +533,10 @@ def parse_args():
     return p.parse_args()
 
 
-def main():
+def main(actions=None):
     global EAR_OPEN, EAR_CLOSED, SHORT_MIN, SHORT_MAX, LONG_MIN
+    if actions is None:
+        actions = ArmActions()
     args = parse_args()
 
     EAR_OPEN = args.ear_open
@@ -568,6 +634,7 @@ def main():
                         draw_ear(frame, eyes, eyes_closed)
                 if cal.done() and not calm_announced:
                     speak("system on")
+                    actions.on_system_on()
                     calm_announced = True
 
             elif not face_seen:
@@ -607,6 +674,10 @@ def main():
                         long_count = 0
                         sys_on = not sys_on
                         speak("on" if sys_on else "off")
+                        if sys_on:
+                            actions.on_system_on()
+                        else:
+                            actions.on_system_off()
                         status = f"system {'on' if sys_on else 'off'}"
                         direction, dir_start = "", 0.0
                         spoken_direction = ""
@@ -614,6 +685,7 @@ def main():
                 # "stop" was spoken earlier; "back" follows after STOP_GAP
                 if back_due_at and now >= back_due_at and sys_on:
                     speak("back")
+                    actions.on_back()
                     back_due_at = 0.0
                     status = "back"
 
@@ -623,11 +695,13 @@ def main():
                         short_pair_pending = False
                         if fetch_mode:
                             speak("stop")
+                            actions.on_stop()
                             back_due_at = now + STOP_GAP
                             fetch_mode = False
                             status = "stop"
                         else:
                             speak("fetch")
+                            actions.on_fetch()
                             fetch_mode = True
                             status = "fetch"
                         direction, dir_start = "", 0.0
@@ -654,6 +728,10 @@ def main():
                         status = "cancelled (left the zone)"
                     elif direction:
                         status = "cancelled (changed zone)"
+                    # "just entered the centre" fires on any arrival at rest,
+                    # whether from a direction or straight after a confirm
+                    if not new_dir and direction:
+                        actions.on_centre()
                     direction = new_dir
                     dir_start = now
                     spoken_direction = ""
@@ -674,6 +752,10 @@ def main():
                       and held >= args.hold + args.confirm_after):
                     speak("confirm")
                     status = f"{direction} confirmed"
+                    # hand the confirmed direction to the arm
+                    hook = DIRECTION_HOOKS.get(direction)
+                    if hook:
+                        getattr(actions, hook)()
                     # a confirm ends the exchange: drop the direction so the
                     # eyes have to leave and come back before it counts again
                     direction = ""
@@ -727,4 +809,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()          # stock run: ArmActions prints what the arm would do
+
+    # Wiring the real arm later is just:
+    #
+    #   from eye_test import ArmActions, main
+    #
+    #   class MyArm(ArmActions):
+    #       def on_left(self):  arm.move(0, -50)
+    #       def on_right(self): arm.move(0, +50)
+    #       def on_up(self):    arm.move(0, +50, dz=+30)
+    #       def on_down(self):  arm.move(0, +50, dz=-30)
+    #       def on_fetch(self): arm.grip(close=True)
+    #       def on_back(self):  arm.home()
+    #
+    #   main(MyArm())
