@@ -10,17 +10,17 @@ Calibration records the resting offset of d relative to c:
 
 GAZE (only while the system is ON and not busy)
     HOR mode
-      d.x - c.x > dx0 + 10  held 1s -> speak "left",  cooldown 1s
-      d.x - c.x < dx0 - 10  held 1s -> speak "right", cooldown 1s
+      d.x - c.x > dx0 + 10  held 1s -> speak "left",  cooldown 2s
+      d.x - c.x < dx0 - 10  held 1s -> speak "right", cooldown 2s
       |d.x - c.x - dx0| <= 10 held 1s -> switch to VER
     VER mode
-      d.y - c.y - dy0 < -10 held 1s -> speak "up",    cooldown 1s
-      d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 1s
+      d.y - c.y - dy0 < -10 held 1s -> speak "up",    cooldown 2s
+      d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 2s
       |d.y - c.y - dy0| <= 10 held 1s -> switch to HOR
 
 BLINKS - three non-overlapping bands, so the gestures never collide
-    0.10 - 0.30 s  short blink -> "confirm"
-                   only inside the 1s cooldown after a spoken direction.
+    0.05 - 0.30 s  short blink -> "confirm"
+                   only inside the 2s cooldown after a spoken direction.
                    It opens a fresh 1s window in which a fetch may start.
                    Short blinks are counted forever on the overlay.
     0.30 - 0.50 s  dead zone, ignored (the width of an ordinary blink)
@@ -56,7 +56,7 @@ import cv2
 import mediapipe as mp
 
 HOLD_SECONDS = 1.0
-COOLDOWN_SECONDS = 1.0
+COOLDOWN_SECONDS = 2.0
 SWITCH_SECONDS = 1.0
 CALIB_WAIT_SECONDS = 2.0
 CALIB_SECONDS = 3.0
@@ -75,11 +75,11 @@ FETCH_MIN = 1.2       # a closure this long, inside the confirm window, is a fet
 CONFIRM_WINDOW = 1.0  # how long after "confirm" a fetch may start
 
 # Three non-overlapping closure bands, so the gestures cannot collide:
-#   0.10 - 0.30 s  short blink -> confirm (only inside a direction cooldown)
+#   0.05 - 0.30 s  short blink -> confirm (only inside a direction cooldown)
 #   0.30 - 0.50 s  dead zone   -> ignored, the width of an ordinary blink
 #   0.50 s and up  long blink  -> counted towards the triple-blink toggle
 #   1.20 s and up  very long   -> fetch (only if it STARTS inside the confirm window)
-SHORT_MIN = 0.10      # shortest closure that counts as a short blink
+SHORT_MIN = 0.05      # shortest closure that counts as a short blink
 SHORT_MAX = 0.30      # longest closure that still counts as a short blink
 LONG_MIN = 0.50       # a closure this long feeds the triple-blink counter
 
