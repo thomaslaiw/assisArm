@@ -70,8 +70,39 @@ process — no extra package, no network.
 
 | file | purpose |
 |---|---|
-| `eye_test.py` | silent build — **no console output at all**; everything is drawn on the preview |
+| `eye_test.py` | silent build — no console output except the arm hooks |
 | `eye_test_verbose.py` | same logic with full console prints; use this when tuning thresholds |
+| `arm_example.py` | shows how to drive a robotic arm from the confirmed events |
+
+## Arm hooks
+
+Every confirmed event calls a method on an `ArmActions` instance:
+
+| hook | fires when |
+|---|---|
+| `on_left` `on_right` `on_up` `on_down` | that direction was confirmed |
+| `on_centre` | the eyes came back to rest |
+| `on_fetch` | fetch mode started |
+| `on_stop` | fetch mode ended |
+| `on_back` | one second after `on_stop` |
+| `on_system_on` `on_system_off` | triple long blink toggled power |
+
+To drive hardware, subclass it and pass the instance to `main()`:
+
+```python
+from eye_test import ArmActions, main
+
+class MyArm(ArmActions):
+    def on_left(self):
+        arm.move(x=-50)
+    def on_fetch(self):
+        arm.grip(close=True)
+
+main(MyArm())
+```
+
+The default class only prints, so a stock run is a readable trace of what the
+arm would have done.
 
 ## Usage
 
