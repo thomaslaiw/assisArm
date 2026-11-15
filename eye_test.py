@@ -149,7 +149,11 @@ EYE_LIDS = {
 
 
 def measure(landmarks, w, h):
-    """a, b, c, d in pixels plus the offset of d from the nose tip."""
+    """a, b, c, d, e in pixels plus the offsets we care about.
+
+    e is the midpoint of the upper eyelids. It sits on the same horizontal
+    line as a, b, c and d, and is currently display-only.
+    """
     def centre(ids):
         return (sum(landmarks[i].x for i in ids) / len(ids) * w,
                 sum(landmarks[i].y for i in ids) / len(ids) * h)
@@ -159,8 +163,14 @@ def measure(landmarks, w, h):
     c = (landmarks[NOSE_TIP].x * w, landmarks[NOSE_TIP].y * h)
     d = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
 
-    return {"a": a, "b": b, "c": c, "d": d,
-            "dx": d[0] - c[0], "dy": d[1] - c[1]}
+    # e = midpoint of the upper eyelids, on the same line as a, b, c and d
+    upper_ids = EYE_LIDS["left"][0] + EYE_LIDS["right"][0]
+    e = (sum(landmarks[i].x for i in upper_ids) / len(upper_ids) * w,
+         sum(landmarks[i].y for i in upper_ids) / len(upper_ids) * h)
+
+    return {"a": a, "b": b, "c": c, "d": d, "e": e,
+            "dx": d[0] - c[0], "dy": d[1] - c[1],
+            "ey": e[1] - c[1]}
 
 
 def eye_aspect_ratio(landmarks, upper, lower, corner_a, corner_b, w, h):
@@ -197,7 +207,8 @@ def draw_points(frame, m, centre):
     for key, colour, label in (("a", (0, 255, 0), "a"),
                                ("b", (0, 0, 255), "b"),
                                ("c", (255, 0, 255), "c"),
-                               ("d", (255, 255, 0), "d")):
+                               ("d", (255, 255, 0), "d"),
+                               ("e", (255, 160, 60), "e")):
         x, y = int(m[key][0]), int(m[key][1])
         cv2.drawMarker(frame, (x, y), colour, cv2.MARKER_CROSS, 16, 2)
         cv2.putText(frame, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX,
@@ -207,6 +218,8 @@ def draw_points(frame, m, centre):
              (int(m["d"][0]), int(m["d"][1])), (150, 150, 150), 1)
     cv2.line(frame, (int(m["a"][0]), int(m["a"][1])),
              (int(m["b"][0]), int(m["b"][1])), (90, 90, 90), 1)
+    cv2.line(frame, (int(m["e"][0]), int(m["e"][1])),
+             (int(m["c"][0]), int(m["c"][1])), (160, 120, 60), 1)
 
     if centre is None:
         return
@@ -296,6 +309,7 @@ def draw_numbers(frame, m, centre, x_err, y_err, direction, held):
     if m is not None:
         lines.append(f"c=({m['c'][0]:.0f},{m['c'][1]:.0f})  d=({m['d'][0]:.0f},{m['d'][1]:.0f})")
         lines.append(f"d-c=({m['dx']:+.1f},{m['dy']:+.1f})")
+        lines.append(f"e-c y={m['ey']:+.1f}")
         if centre is not None:
             lines.append(f"err=({x_err:+.1f},{y_err:+.1f})")
     else:
@@ -324,7 +338,8 @@ def draw_calibration(frame, label, progress, m):
 
     if m is not None:
         cv2.putText(frame,
-                    f"c=({m['c'][0]:.0f},{m['c'][1]:.0f}) d=({m['d'][0]:.0f},{m['d'][1]:.0f})",
+                    f"c=({m['c'][0]:.0f},{m['c'][1]:.0f}) d=({m['d'][0]:.0f},{m['d'][1]:.0f}) "
+                    f"e-c y={m['ey']:+.1f}",
                     (16, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
 
