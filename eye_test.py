@@ -21,13 +21,16 @@ VER mode
 The active mode is checked first, so HOR looks at x before y and vice versa.
 Cooldown blocks all detection for 1 second after any utterance.
 
+This build prints nothing to the console: everything is drawn on the preview.
+Use eye_test_verbose.py when the numbers are needed for tuning.
+
 Usage:
     python eye_test.py                      # calibrate then run
     python eye_test.py --dx0 -232 --dy0 -38 # reuse a previous centre
     python eye_test.py --flip-y             # invert up/down if your camera needs it
 
 Keys:
-    ENTER saves the raw frame (no markers) and prints the numbers
+    ENTER saves the raw frame (no markers)
     Q / ESC quits
 
 Everything runs locally. No image leaves this machine.
@@ -74,7 +77,6 @@ def speak(text):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    print(f"\n[tts] {text}")
 
 
 # ---------------------------------------------------------------- landmarks
@@ -107,8 +109,8 @@ def measure(landmarks, w, h):
             "dx": d[0] - c[0], "dy": d[1] - c[1]}
 
 
-def draw_debug(frame, m, centre, mode, state_msg):
-    """Draw a, b, c, d, the resting centre and the decision bands."""
+def draw_debug(frame, m, centre, mode, state_msg, calib_label, calib_progress):
+    """Everything the console used to say, drawn on the frame instead."""
     h, w = frame.shape[:2]
 
     for key, colour, label in (("a", (0, 255, 0), "a"),
@@ -140,6 +142,48 @@ def draw_debug(frame, m, centre, mode, state_msg):
     if state_msg:
         cv2.putText(frame, state_msg, (12, 58),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+
+def draw_numbers(frame, m, centre, x_err, y_err, trig_dir, held, sw_held, action):
+    """Live readout block, bottom-left, replacing the console status line."""
+    h, w = frame.shape[:2]
+    lines = []
+
+    if m is not None:
+        lines.append(f"c=({m['c'][0]:.0f},{m['c'][1]:.0f})  d=({m['d'][0]:.0f},{m['d'][1]:.0f})")
+        lines.append(f"d-c=({m['dx']:+.1f},{m['dy']:+.1f})")
+        if centre is not None:
+            lines.append(f"err=({x_err:+.1f},{y_err:+.1f})")
+    else:
+        lines.append("no face")
+
+    lines.append(f"trig={trig_dir or '-'}  held={held:.1f}s  sw={sw_held:.1f}s")
+    if action and action != "-":
+        lines.append(action)
+
+    y0 = h - 16 - (len(lines) - 1) * 20
+    for i, text in enumerate(lines):
+        cv2.putText(frame, text, (12, y0 + i * 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+
+def draw_calibration(frame, label, progress, m):
+    """Calibration prompt and progress, drawn instead of printed."""
+    h, w = frame.shape[:2]
+
+    cv2.rectangle(frame, (0, 0), (w, 90), (40, 40, 40), -1)
+    cv2.putText(frame, label, (16, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                1.0, (0, 255, 255), 2)
+
+    bar_w = int((w - 32) * max(0.0, min(1.0, progress)))
+    cv2.rectangle(frame, (16, 56), (w - 16, 76), (70, 70, 70), -1)
+    if progress > 0:
+        cv2.rectangle(frame, (16, 56), (16 + bar_w, 76), (0, 255, 0), -1)
+
+    if m is not None:
+        cv2.putText(frame,
+                    f"c=({m['c'][0]:.0f},{m['c'][1]:.0f}) d=({m['d'][0]:.0f},{m['d'][1]:.0f})",
+                    (16, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
 
 # ---------------------------------------------------------------- calibration
@@ -177,18 +221,11 @@ class RestCalibration:
             ys = sorted(p[1] for p in self.samples)
             self.dx0 = xs[len(xs) // 2]
             self.dy0 = ys[len(ys) // 2]
-            print(f"\nresting offset d-c: dx0={self.dx0:+.1f}  dy0={self.dy0:+.1f} "
-                  f"({len(self.samples)} frames)")
 
         return "RECORDING CENTRE", min(1.0, progress)
 
     def done(self):
         return self.dx0 is not None and self.dy0 is not None
-
-
-def hold_bar(held, total, width=20):
-    n = int(width * min(1.0, held / total))
-    return "[" + "#" * n + "-" * (width - n) + "]"
 
 
 def save_frame(frame):
@@ -197,8 +234,7 @@ def save_frame(frame):
         name = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}.png"
         path = os.path.join(FRAME_DIR, name)
         return path if cv2.imwrite(path, frame) else None
-    except OSError as e:
-        print(f"[frame] cannot write to {FRAME_DIR}: {e}")
+    except OSError:
         return None
 
 
@@ -214,7 +250,8 @@ def parse_args():
     p.add_argument("--flip-y", action="store_true", help="invert the up/down test")
     p.add_argument("--calib", action="store_true", help="calibrate even if dx0/dy0 given")
     p.add_argument("--no-preview", action="store_true", help="run headless")
-    p.add_argument("--debug", action="store_true", help="draw a, b, c, d and the bands")
+    p.add_argument("--plain", action="store_true",
+                   help="raw camera image only, no overlay at all")
     return p.parse_args()
 
 
@@ -227,55 +264,38 @@ def main():
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
-        print("ERROR: cannot open webcam. Close any app using the camera and retry.")
         return
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, VIEW_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIEW_H)
 
-    WIN = "Eye test - Q/ESC quit, ENTER save frame"
+    WIN = "Eye tracking"
     show_preview = not args.no_preview
     if show_preview:
         cv2.namedWindow(WIN, cv2.WINDOW_AUTOSIZE)
         cv2.moveWindow(WIN, 0, 0)
 
-    print("=" * 78)
-    print("Eye tracking. HOR / VER mode switch. Local only.")
-    print(f"  HOR: {args.left_px:.0f}px left  -> left   |  {args.right_px:.0f}px right -> right")
-    print(f"       back within {args.center_px:.0f}px for {SWITCH_SECONDS:.0f}s -> switch to VER")
-    print(f"  VER: {args.up_px:.0f}px up    -> up     |  {args.down_px:.0f}px down  -> down")
-    print(f"       back within {args.center_px:.0f}px for {SWITCH_SECONDS:.0f}s -> switch to HOR")
-    print(f"  each action needs {HOLD_SECONDS:.0f}s hold, then {COOLDOWN_SECONDS:.0f}s cooldown")
-    print(f"  ENTER saves the raw frame to {FRAME_DIR}")
-    print("  Q / ESC / window X to quit.")
-    if args.flip_y:
-        print("  --flip-y active: up and down are swapped")
-    if args.debug:
-        print("  debug overlay ON (preview only)")
-    print("=" * 78)
-
     cal = RestCalibration()
     if fixed:
         cal.dx0, cal.dy0 = fixed
-        print(f"resting offset: dx0={cal.dx0:+.1f} dy0={cal.dy0:+.1f}")
 
     mode = "HOR"
     calib_announced = False
-    last_line = ""
 
-    # timers
     trig_dir = None
     trig_start = 0.0
     switch_start = None
     cooldown_until = 0.0
 
-    G = {"m": None, "mode": mode, "state": ""}
+    m = None
+    action = "-"
+    x_err = y_err = 0.0
+    held = sw_held = 0.0
 
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
-                print("ERROR: lost camera frame.")
                 break
 
             frame = cv2.flip(frame, 1)
@@ -295,37 +315,20 @@ def main():
                 if cal.needs_prompt():
                     cal.do_prompt(now)
                 label, progress = cal.feed(m, now)
-                detail = (f"c=({m['c'][0]:6.1f},{m['c'][1]:6.1f}) "
-                          f"d=({m['d'][0]:6.1f},{m['d'][1]:6.1f}) "
-                          f"d-c=({m['dx']:+6.1f},{m['dy']:+6.1f})") if m else "no face"
-                if progress < 0:
-                    line = f"{label:<38} {detail}"
-                else:
-                    line = (f"{label} {hold_bar(progress * CALIB_SECONDS, CALIB_SECONDS)} "
-                            f"{progress * 100:3.0f}%  {detail}")
-                if line != last_line:
-                    print("\r" + line + " " * 6, end="", flush=True)
-                    last_line = line
-                G.update(m=m, state="calibrating")
+                if show_preview and not args.plain:
+                    draw_calibration(frame, label, max(0.0, progress), m)
 
             elif m is None:
-                # no face: reset timers, keep the mode
                 trig_dir, trig_start, switch_start = None, 0.0, None
-                line = "no face"
-                if line != last_line:
-                    print("\r" + line + " " * 80, end="", flush=True)
-                    last_line = line
+                action = "no face"
 
             else:
                 if not calib_announced:
-                    print("\r" + " " * 100, end="\r")
-                    print("Tracking now. Mode: HOR")
                     speak("ready")
                     calib_announced = True
-                    last_line = ""
 
-                x_err = m["dx"] - cal.dx0          # + means d is left of rest
-                y_err = m["dy"] - cal.dy0          # - means d is above rest
+                x_err = m["dx"] - cal.dx0
+                y_err = m["dy"] - cal.dy0
                 if args.flip_y:
                     y_err = -y_err
 
@@ -333,12 +336,10 @@ def main():
                 action = "-"
 
                 if cooling:
-                    # ignore everything, keep timers frozen
                     action = f"cooldown {cooldown_until - now:.1f}s"
                     trig_dir, trig_start, switch_start = None, 0.0, None
 
                 elif mode == "HOR":
-                    # horizontal is checked first
                     if x_err > args.left_px:
                         want = "left"
                     elif x_err < -args.right_px:
@@ -402,24 +403,20 @@ def main():
                 held = (now - trig_start) if trig_dir else 0.0
                 sw_held = (now - switch_start) if switch_start else 0.0
 
-                line = (f"{mode}  c=({m['c'][0]:5.0f},{m['c'][1]:5.0f}) "
-                        f"d=({m['d'][0]:5.0f},{m['d'][1]:5.0f}) "
-                        f"err=({x_err:+6.1f},{y_err:+6.1f}) "
-                        f"{trig_dir or '-':<5} {hold_bar(held, HOLD_SECONDS)} "
-                        f"sw {hold_bar(sw_held, SWITCH_SECONDS)} {action}")
-
-                if line != last_line:
-                    print("\r" + line + " " * 8, end="", flush=True)
-                    last_line = line
-
-                G.update(m=m, mode=mode, state=action)
-
             # -------------------------------------------- window
             if show_preview:
                 display = frame.copy()
-                if args.debug and m is not None:
-                    centre = (cal.dx0, cal.dy0) if cal.done() else None
-                    draw_debug(display, m, centre, mode, G["state"])
+                if not args.plain:
+                    if cal.done():
+                        if m is not None:
+                            draw_debug(display, m, (cal.dx0, cal.dy0), mode, action, None, 0)
+                            draw_numbers(display, m, (cal.dx0, cal.dy0),
+                                         x_err, y_err, trig_dir, held, sw_held, action)
+                        else:
+                            cv2.putText(display, "no face", (12, 28),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                            cv2.putText(display, f"mode {mode}", (12, 58),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
 
                 cv2.imshow(WIN, display)
                 key = cv2.waitKey(1) & 0xFF
@@ -428,35 +425,18 @@ def main():
                     break
 
                 if key in (13, 10):
-                    path = save_frame(frame)
-                    print("\n" + "-" * 78)
-                    print(f"[capture] image : {path if path else 'FAILED to save'}")
-                    if G["m"] is not None:
-                        mm = G["m"]
-                        print(f"[capture] a left pupil : ({mm['a'][0]:.1f}, {mm['a'][1]:.1f})")
-                        print(f"[capture] b right pupil: ({mm['b'][0]:.1f}, {mm['b'][1]:.1f})")
-                        print(f"[capture] c nose       : ({mm['c'][0]:.1f}, {mm['c'][1]:.1f})")
-                        print(f"[capture] d midpoint   : ({mm['d'][0]:.1f}, {mm['d'][1]:.1f})")
-                        print(f"[capture] d - c        : ({mm['dx']:+.1f}, {mm['dy']:+.1f})")
-                    if cal.done():
-                        print(f"[capture] resting      : dx0={cal.dx0:+.1f} dy0={cal.dy0:+.1f}")
-                    print(f"[capture] thresholds   : left {args.left_px:.0f} right {args.right_px:.0f} "
-                          f"up {args.up_px:.0f} down {args.down_px:.0f} centre {args.center_px:.0f}")
-                    print(f"[capture] mode         : {G['mode']}")
-                    print(f"[capture] last action  : {G['state']}")
-                    print("-" * 78)
+                    save_frame(frame)
 
                 if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
                     break
 
     except KeyboardInterrupt:
-        print("\nStopped by user.")
+        pass
 
     finally:
         cap.release()
         if show_preview:
             cv2.destroyAllWindows()
-        print()
 
 
 if __name__ == "__main__":
