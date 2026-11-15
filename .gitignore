@@ -1,0 +1,11 @@
+# never commit captures of the user's face
+*.png
+*.jpg
+*.jpeg
+saved_frames/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
