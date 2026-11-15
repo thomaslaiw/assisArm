@@ -25,10 +25,14 @@ DIRECTIONS
         x less    than dx0 - RIGHT_PX  -> right
         y less    than dy0 - UP_PX     -> up
         y greater than dy0 + DOWN_PX   -> down
-    Holding a direction for HOLD_SECONDS speaks it. If the eyes stay on that
-    same direction for another CONFIRM_SECONDS without any blink, the speaker
-    says "confirm" and then waits: no further action until the gaze leaves
-    and comes back.
+    Holding a direction for HOLD_SECONDS speaks it. Keeping the eyes on that
+    same direction for another CONFIRM_SECONDS without a blink makes the
+    speaker say "confirm".
+
+    While the speaker is talking the direction is not re-evaluated, so the
+    word and the confirm never overlap. After a confirm the system waits: it
+    stays locked until the eyes return to the centre band, which releases the
+    lock and arms the next direction.
 
 This build prints nothing to the console: everything is drawn on the preview.
 Use eye_test_verbose.py when the numbers are needed for tuning.
@@ -594,6 +598,15 @@ def main():
                     if new_dir != spoken_direction:
                         confirmed_for = ""
                         confirm_done = False
+
+                # returning to the centre band releases the confirm lock, so the
+                # next direction can be spoken again
+                if confirm_done and not direction:
+                    confirm_done = False
+                    confirmed_for = ""
+                    spoken_direction = ""
+                    status = "released, centre"
+
                 held = (now - dir_start) if direction else 0.0
 
                 # speak the direction once it is held long enough
