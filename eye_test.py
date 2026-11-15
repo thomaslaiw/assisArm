@@ -1,30 +1,34 @@
 """
-Eye tracking test - per-eye decisions, merged.
+Eye tracking with a mode switch between horizontal and vertical.
 
-Each eye has its own centre point and its own left/right/up/down test:
-    x > x0 + dx -> left        x < x0 - dx -> right
-    y < y0 - dy -> up          y > y0 + dy -> down
+Points:
+    a = my left pupil        b = my right pupil
+    c = nose tip             d = 2D midpoint of a and b
 
-Merge rules:
-    both eyes agree            -> that direction
-    one eye decides, other is
-    in the middle band         -> that direction
-    both in the middle         -> centre
-    the two eyes disagree      -> centre
+Calibration records the resting offset of d relative to c:
+    dx0 = d.x - c.x          dy0 = d.y - c.y
+
+HOR mode (default)
+    d.x - c.x > dx0 + 10  held 1s -> speak "left",  cooldown 1s, stay in HOR
+    d.x - c.x < dx0 - 10  held 1s -> speak "right", cooldown 1s, stay in HOR
+    |d.x - c.x - dx0| <= 10 held 1s -> switch to VER
+
+VER mode
+    d.y - c.y - dy0 < -10 held 1s -> speak "up",    cooldown 1s
+    d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 1s
+    |d.y - c.y - dy0| <= 10 held 1s -> switch to HOR
+
+The active mode is checked first, so HOR looks at x before y and vice versa.
+Cooldown blocks all detection for 1 second after any utterance.
 
 Usage:
-    python eye_test.py                                     # calibrate both eyes
-    python eye_test.py --lx0 470 --ly0 265 --rx0 700 --ry0 268
-    python eye_test.py --lx0 470 --ly0 265 --rx0 700 --ry0 268 --dx 100 --dy 20
-
-Speech:
-  single axis held 2s -> left/right/up/down
-  both axes held 3s   -> combined word
-  any state held 5s   -> "<state> confirm"
+    python eye_test.py                      # calibrate then run
+    python eye_test.py --dx0 -232 --dy0 -38 # reuse a previous centre
+    python eye_test.py --flip-y             # invert up/down if your camera needs it
 
 Keys:
-  ENTER saves the raw frame (no markers) and prints the data
-  Q/ESC quits
+    ENTER saves the raw frame (no markers) and prints the numbers
+    Q / ESC quits
 
 Everything runs locally. No image leaves this machine.
 """
@@ -37,14 +41,17 @@ import time
 import cv2
 import mediapipe as mp
 
-HINT_SECONDS = 2.0
-COMBINED_SECONDS = 3.0
-CONFIRM_SECONDS = 5.0
+HOLD_SECONDS = 1.0
+COOLDOWN_SECONDS = 1.0
+SWITCH_SECONDS = 1.0
 CALIB_WAIT_SECONDS = 2.0
 CALIB_SECONDS = 3.0
 
-DEFAULT_DX = 100
-DEFAULT_DY = 20
+LEFT_PX = 10.0        # d must be this far left of the resting x
+RIGHT_PX = 10.0       # ...or this far right
+UP_PX = 10.0          # d must rise this much
+DOWN_PX = 5.0         # d must fall this much
+CENTER_PX = 10.0      # back within this band switches mode
 
 VIEW_W, VIEW_H = 1280, 720
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -67,7 +74,7 @@ def speak(text):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    print(f"[tts] {text}")
+    print(f"\n[tts] {text}")
 
 
 # ---------------------------------------------------------------- landmarks
@@ -79,57 +86,72 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_tracking_confidence=0.5,
 )
 
-# The image is mirrored before display, so 468s sit on the viewer's left,
-# which is YOUR RIGHT eye. Names below follow the person's own anatomy.
-MY_RIGHT_EYE_IRIS = [468, 469, 470, 471, 472]      # left side of the frame
-MY_LEFT_EYE_IRIS = [473, 474, 475, 476, 477]       # right side of the frame
+# mirrored image: 468s are on the viewer's left = YOUR right eye
+MY_RIGHT_EYE_IRIS = [468, 469, 470, 471, 472]
+MY_LEFT_EYE_IRIS = [473, 474, 475, 476, 477]
+NOSE_TIP = 1
 
 
-def eye_centres(landmarks, w, h):
-    """Return ((rx, ry), (lx, ly)) in pixels, from your own point of view."""
+def measure(landmarks, w, h):
+    """a, b, c, d in pixels plus the offsets we care about."""
     def centre(ids):
         return (sum(landmarks[i].x for i in ids) / len(ids) * w,
                 sum(landmarks[i].y for i in ids) / len(ids) * h)
 
-    r = centre(MY_RIGHT_EYE_IRIS)
-    l = centre(MY_LEFT_EYE_IRIS)
-    return r, l
+    a = centre(MY_LEFT_EYE_IRIS)       # my left pupil
+    b = centre(MY_RIGHT_EYE_IRIS)      # my right pupil
+    c = (landmarks[NOSE_TIP].x * w, landmarks[NOSE_TIP].y * h)
+    d = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+
+    return {"a": a, "b": b, "c": c, "d": d,
+            "dx": d[0] - c[0], "dy": d[1] - c[1]}
 
 
-def draw_debug(frame, eye_pos, centres, dx, dy):
-    """Mark pupils plus per-eye decision bands."""
+def draw_debug(frame, m, centre, mode, state_msg):
+    """Draw a, b, c, d, the resting centre and the decision bands."""
     h, w = frame.shape[:2]
-    (rx, ry), (lx, ly) = eye_pos
 
-    cv2.drawMarker(frame, (int(rx), int(ry)), (0, 0, 255), cv2.MARKER_CROSS, 18, 2)
-    cv2.drawMarker(frame, (int(lx), int(ly)), (0, 255, 0), cv2.MARKER_CROSS, 18, 2)
+    for key, colour, label in (("a", (0, 255, 0), "a"),
+                               ("b", (0, 0, 255), "b"),
+                               ("c", (255, 0, 255), "c"),
+                               ("d", (255, 255, 0), "d")):
+        x, y = int(m[key][0]), int(m[key][1])
+        cv2.drawMarker(frame, (x, y), colour, cv2.MARKER_CROSS, 16, 2)
+        cv2.putText(frame, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, colour, 2)
 
-    if centres is None:
-        return
-    (rx0, ry0), (lx0, ly0) = centres
+    cv2.line(frame, (int(m["c"][0]), int(m["c"][1])),
+             (int(m["d"][0]), int(m["d"][1])), (150, 150, 150), 1)
+    cv2.line(frame, (int(m["a"][0]), int(m["a"][1])),
+             (int(m["b"][0]), int(m["b"][1])), (90, 90, 90), 1)
 
-    for x0, colour in ((rx0, (0, 0, 200)), (lx0, (0, 180, 0))):
-        for xx in (x0 - dx, x0 + dx):
-            cv2.line(frame, (int(xx), 0), (int(xx), h), colour, 1)
-    for y0, colour in ((ry0, (0, 0, 200)), (ly0, (0, 180, 0))):
-        for yy in (y0 - dy, y0 + dy):
-            cv2.line(frame, (0, int(yy)), (w, int(yy)), colour, 1)
+    if centre is not None:
+        dx0, dy0 = centre
+        cx, cy = int(m["c"][0] + dx0), int(m["c"][1] + dy0)
+        cv2.drawMarker(frame, (cx, cy), (255, 0, 255), cv2.MARKER_DIAMOND, 18, 2)
+        for xx in (int(cx - LEFT_PX), int(cx + RIGHT_PX)):
+            cv2.line(frame, (xx, 0), (xx, h), (80, 80, 200), 1)
+        for yy in (int(cy - UP_PX), int(cy + DOWN_PX)):
+            cv2.line(frame, (0, yy), (w, yy), (200, 160, 80), 1)
 
-    cv2.drawMarker(frame, (int(rx0), int(ry0)), (255, 0, 255), cv2.MARKER_DIAMOND, 18, 2)
-    cv2.drawMarker(frame, (int(lx0), int(ly0)), (255, 0, 255), cv2.MARKER_DIAMOND, 18, 2)
+    cv2.putText(frame, f"mode {mode}", (12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                (0, 255, 0) if mode == "HOR" else (0, 200, 255), 2)
+    if state_msg:
+        cv2.putText(frame, state_msg, (12, 58),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
 
 # ---------------------------------------------------------------- calibration
-class CentreCalibration:
-    """One prompt: look straight ahead. Records the median position of each eye."""
+class RestCalibration:
+    """Records the resting offset of d relative to c."""
 
     def __init__(self):
         self.prompt_at = None
         self.record_start = None
-        self.samples_r = []
-        self.samples_l = []
-        self.centre_r = None
-        self.centre_l = None
+        self.samples = []
+        self.dx0 = None
+        self.dy0 = None
 
     def needs_prompt(self):
         return self.prompt_at is None
@@ -138,13 +160,7 @@ class CentreCalibration:
         speak("Please look straight ahead")
         self.prompt_at = now
 
-    @staticmethod
-    def _median(pairs):
-        xs = sorted(p[0] for p in pairs)
-        ys = sorted(p[1] for p in pairs)
-        return xs[len(xs) // 2], ys[len(ys) // 2]
-
-    def feed(self, eye_pos, now):
+    def feed(self, m, now):
         waited = now - self.prompt_at
         if waited < CALIB_WAIT_SECONDS:
             return f"LOOK CENTRE - starting in {CALIB_WAIT_SECONDS - waited:.1f}s", -1.0
@@ -153,41 +169,24 @@ class CentreCalibration:
             self.record_start = now
         progress = (now - self.record_start) / CALIB_SECONDS
 
-        if eye_pos is not None:
-            self.samples_r.append(eye_pos[0])
-            self.samples_l.append(eye_pos[1])
+        if m is not None:
+            self.samples.append((m["dx"], m["dy"]))
 
-        if progress >= 1.0 and self.samples_r:
-            self.centre_r = self._median(self.samples_r)
-            self.centre_l = self._median(self.samples_l)
-            print(f"\ncentre: my right eye = ({self.centre_r[0]:.1f}, {self.centre_r[1]:.1f})")
-            print(f"        my left  eye = ({self.centre_l[0]:.1f}, {self.centre_l[1]:.1f})")
+        if progress >= 1.0 and self.samples:
+            xs = sorted(p[0] for p in self.samples)
+            ys = sorted(p[1] for p in self.samples)
+            self.dx0 = xs[len(xs) // 2]
+            self.dy0 = ys[len(ys) // 2]
+            print(f"\nresting offset d-c: dx0={self.dx0:+.1f}  dy0={self.dy0:+.1f} "
+                  f"({len(self.samples)} frames)")
 
         return "RECORDING CENTRE", min(1.0, progress)
 
     def done(self):
-        return self.centre_r is not None and self.centre_l is not None
+        return self.dx0 is not None and self.dy0 is not None
 
 
-def eye_direction(pos, centre, dx, dy):
-    """Per-axis direction for one eye: returns (horiz, vert), each '' or a word."""
-    if pos is None or centre is None:
-        return "", ""
-    x, y = pos
-    x0, y0 = centre
-    horiz = "left" if x > x0 + dx else ("right" if x < x0 - dx else "")
-    vert = "up" if y < y0 - dy else ("down" if y > y0 + dy else "")
-    return horiz, vert
-
-
-def merge_axis(a, b):
-    """Merge two eyes on ONE axis. Returns '' , the agreed word, or 'conflict'."""
-    if a and b:
-        return a if a == b else "conflict"
-    return a or b
-
-
-def hold_bar(held, total, width=32):
+def hold_bar(held, total, width=20):
     n = int(width * min(1.0, held / total))
     return "[" + "#" * n + "-" * (width - n) + "]"
 
@@ -199,21 +198,23 @@ def save_frame(frame):
         path = os.path.join(FRAME_DIR, name)
         return path if cv2.imwrite(path, frame) else None
     except OSError as e:
-        print(f"\n[frame] cannot write to {FRAME_DIR}: {e}")
+        print(f"[frame] cannot write to {FRAME_DIR}: {e}")
         return None
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Eye tracking, per-eye decisions")
-    p.add_argument("--lx0", type=float, default=None, help="my LEFT eye centre x")
-    p.add_argument("--ly0", type=float, default=None, help="my LEFT eye centre y")
-    p.add_argument("--rx0", type=float, default=None, help="my RIGHT eye centre x")
-    p.add_argument("--ry0", type=float, default=None, help="my RIGHT eye centre y")
-    p.add_argument("--dx", type=float, default=DEFAULT_DX, help="horizontal offset")
-    p.add_argument("--dy", type=float, default=DEFAULT_DY, help="vertical offset")
-    p.add_argument("--calib", action="store_true", help="calibrate even if centres are given")
-    p.add_argument("--no-preview", action="store_true", help="do not open the camera window")
-    p.add_argument("--debug", action="store_true", help="draw pupils and bands")
+    p = argparse.ArgumentParser(description="Eye tracking, HOR/VER mode switch")
+    p.add_argument("--dx0", type=float, default=None, help="resting d.x - c.x")
+    p.add_argument("--dy0", type=float, default=None, help="resting d.y - c.y")
+    p.add_argument("--left-px", type=float, default=LEFT_PX)
+    p.add_argument("--right-px", type=float, default=RIGHT_PX)
+    p.add_argument("--up-px", type=float, default=UP_PX)
+    p.add_argument("--down-px", type=float, default=DOWN_PX)
+    p.add_argument("--center-px", type=float, default=CENTER_PX)
+    p.add_argument("--flip-y", action="store_true", help="invert the up/down test")
+    p.add_argument("--calib", action="store_true", help="calibrate even if dx0/dy0 given")
+    p.add_argument("--no-preview", action="store_true", help="run headless")
+    p.add_argument("--debug", action="store_true", help="draw a, b, c, d and the bands")
     return p.parse_args()
 
 
@@ -221,11 +222,8 @@ def main():
     args = parse_args()
 
     fixed = None
-    if not args.calib and None not in (args.lx0, args.ly0, args.rx0, args.ry0):
-        fixed = ((args.rx0, args.ry0), (args.lx0, args.ly0))
-    elif not args.calib and any(v is not None for v in (args.lx0, args.ly0, args.rx0, args.ry0)):
-        print("ERROR: give ALL FOUR centres (--lx0 --ly0 --rx0 --ry0) or none.")
-        return
+    if not args.calib and args.dx0 is not None and args.dy0 is not None:
+        fixed = (args.dx0, args.dy0)
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -241,36 +239,37 @@ def main():
         cv2.namedWindow(WIN, cv2.WINDOW_AUTOSIZE)
         cv2.moveWindow(WIN, 0, 0)
 
-    print("=" * 66)
-    print("Eye test. Per-eye decisions. Local only.")
-    print(f"  each eye: x > x0+{args.dx:.0f} -> left   x < x0-{args.dx:.0f} -> right")
-    print(f"            y < y0-{args.dy:.0f} -> up     y > y0+{args.dy:.0f} -> down")
-    print("  both agree -> that word; one decides, other neutral -> that word")
-    print("  both neutral -> centre; the two disagree -> centre")
-    print(f"  single axis {HINT_SECONDS:.0f}s -> word, both axes {COMBINED_SECONDS:.0f}s -> combined")
-    print(f"  any state {CONFIRM_SECONDS:.0f}s -> '<state> confirm'")
+    print("=" * 78)
+    print("Eye tracking. HOR / VER mode switch. Local only.")
+    print(f"  HOR: {args.left_px:.0f}px left  -> left   |  {args.right_px:.0f}px right -> right")
+    print(f"       back within {args.center_px:.0f}px for {SWITCH_SECONDS:.0f}s -> switch to VER")
+    print(f"  VER: {args.up_px:.0f}px up    -> up     |  {args.down_px:.0f}px down  -> down")
+    print(f"       back within {args.center_px:.0f}px for {SWITCH_SECONDS:.0f}s -> switch to HOR")
+    print(f"  each action needs {HOLD_SECONDS:.0f}s hold, then {COOLDOWN_SECONDS:.0f}s cooldown")
     print(f"  ENTER saves the raw frame to {FRAME_DIR}")
     print("  Q / ESC / window X to quit.")
+    if args.flip_y:
+        print("  --flip-y active: up and down are swapped")
     if args.debug:
         print("  debug overlay ON (preview only)")
-    print("=" * 66)
+    print("=" * 78)
 
-    cal = CentreCalibration()
+    cal = RestCalibration()
     if fixed:
-        cal.centre_r, cal.centre_l = fixed
-        print(f"centre: my right = ({cal.centre_r[0]:.1f}, {cal.centre_r[1]:.1f})  "
-              f"my left = ({cal.centre_l[0]:.1f}, {cal.centre_l[1]:.1f})")
+        cal.dx0, cal.dy0 = fixed
+        print(f"resting offset: dx0={cal.dx0:+.1f} dy0={cal.dy0:+.1f}")
 
+    mode = "HOR"
     calib_announced = False
     last_line = ""
 
-    h_state = v_state = ""
-    h_start = v_start = 0.0
-    spoken = set()
-    announced_state = None
+    # timers
+    trig_dir = None
+    trig_start = 0.0
+    switch_start = None
+    cooldown_until = 0.0
 
-    G = {"r": None, "l": None, "h_state": "", "v_state": "",
-         "h_held": 0.0, "v_held": 0.0, "state": ""}
+    G = {"m": None, "mode": mode, "state": ""}
 
     try:
         while True:
@@ -283,123 +282,144 @@ def main():
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result = face_mesh.process(rgb)
 
-            eye_pos = None
+            m = None
             if result.multi_face_landmarks:
                 lm = result.multi_face_landmarks[0].landmark
-                eye_pos = eye_centres(lm, frame.shape[1], frame.shape[0])
+                m = measure(lm, frame.shape[1], frame.shape[0])
 
             now = time.time()
-            if eye_pos is not None:
-                (rx, ry), (lx, ly) = eye_pos
-                g = f"R=({rx:.0f},{ry:.0f}) L=({lx:.0f},{ly:.0f})"
-            else:
-                g = "no face"
+            cooling = now < cooldown_until
 
             # -------------------------------------------- calibration
             if not cal.done():
                 if cal.needs_prompt():
                     cal.do_prompt(now)
-                label, progress = cal.feed(eye_pos, now)
+                label, progress = cal.feed(m, now)
+                detail = (f"c=({m['c'][0]:6.1f},{m['c'][1]:6.1f}) "
+                          f"d=({m['d'][0]:6.1f},{m['d'][1]:6.1f}) "
+                          f"d-c=({m['dx']:+6.1f},{m['dy']:+6.1f})") if m else "no face"
                 if progress < 0:
-                    line = f"{label:<40} {g}"
+                    line = f"{label:<38} {detail}"
                 else:
-                    line = f"{label}  {hold_bar(progress * CALIB_SECONDS, CALIB_SECONDS)}  {g}"
+                    line = (f"{label} {hold_bar(progress * CALIB_SECONDS, CALIB_SECONDS)} "
+                            f"{progress * 100:3.0f}%  {detail}")
                 if line != last_line:
-                    print("\r" + line + " " * 10, end="", flush=True)
+                    print("\r" + line + " " * 6, end="", flush=True)
                     last_line = line
-                G.update(r=eye_pos[0] if eye_pos else None,
-                         l=eye_pos[1] if eye_pos else None, state="calibrating")
+                G.update(m=m, state="calibrating")
+
+            elif m is None:
+                # no face: reset timers, keep the mode
+                trig_dir, trig_start, switch_start = None, 0.0, None
+                line = "no face"
+                if line != last_line:
+                    print("\r" + line + " " * 80, end="", flush=True)
+                    last_line = line
 
             else:
                 if not calib_announced:
-                    print("\r" + " " * 120, end="\r")
-                    print("Tracking now.")
+                    print("\r" + " " * 100, end="\r")
+                    print("Tracking now. Mode: HOR")
                     speak("ready")
                     calib_announced = True
                     last_line = ""
 
-                # ---------------------------------------- per-eye decisions
-                r_eye = eye_pos[0] if eye_pos else None
-                l_eye = eye_pos[1] if eye_pos else None
+                x_err = m["dx"] - cal.dx0          # + means d is left of rest
+                y_err = m["dy"] - cal.dy0          # - means d is above rest
+                if args.flip_y:
+                    y_err = -y_err
 
-                rh, rv = eye_direction(r_eye, cal.centre_r, args.dx, args.dy)
-                lh, lv = eye_direction(l_eye, cal.centre_l, args.dx, args.dy)
+                spoken = None
+                action = "-"
 
-                mh = merge_axis(rh, lh)
-                mv = merge_axis(rv, lv)
-                # a conflict means the eyes point opposite ways on that axis
-                if mh == "conflict":
-                    mh = ""
-                if mv == "conflict":
-                    mv = ""
+                if cooling:
+                    # ignore everything, keep timers frozen
+                    action = f"cooldown {cooldown_until - now:.1f}s"
+                    trig_dir, trig_start, switch_start = None, 0.0, None
 
-                new_h, new_v = mh, mv
+                elif mode == "HOR":
+                    # horizontal is checked first
+                    if x_err > args.left_px:
+                        want = "left"
+                    elif x_err < -args.right_px:
+                        want = "right"
+                    else:
+                        want = None
 
-                if new_h != h_state:
-                    h_state = new_h
-                    h_start = now
-                if new_v != v_state:
-                    v_state = new_v
-                    v_start = now
+                    if want:
+                        switch_start = None
+                        if trig_dir != want:
+                            trig_dir, trig_start = want, now
+                        elif now - trig_start >= HOLD_SECONDS:
+                            spoken = want
+                            action = f"say {want}"
+                            cooldown_until = now + COOLDOWN_SECONDS
+                            trig_dir, trig_start = None, 0.0
+                    else:
+                        trig_dir, trig_start = None, 0.0
+                        if abs(x_err) <= args.center_px:
+                            if switch_start is None:
+                                switch_start = now
+                            elif now - switch_start >= SWITCH_SECONDS:
+                                mode = "VER"
+                                switch_start = None
+                                action = "-> VER"
+                        else:
+                            switch_start = None
 
-                h_held = (now - h_start) if h_state else 0.0
-                v_held = (now - v_start) if v_state else 0.0
+                else:  # VER
+                    if y_err < -args.up_px:
+                        want = "up"
+                    elif y_err > args.down_px:
+                        want = "down"
+                    else:
+                        want = None
 
-                state = (f"{h_state} {v_state}" if (h_state and v_state)
-                         else (h_state or v_state or "centre"))
-                if state != announced_state:
-                    announced_state = state
-                    spoken.clear()
+                    if want:
+                        switch_start = None
+                        if trig_dir != want:
+                            trig_dir, trig_start = want, now
+                        elif now - trig_start >= HOLD_SECONDS:
+                            spoken = want
+                            action = f"say {want}"
+                            cooldown_until = now + COOLDOWN_SECONDS
+                            trig_dir, trig_start = None, 0.0
+                    else:
+                        trig_dir, trig_start = None, 0.0
+                        if abs(y_err) <= args.center_px:
+                            if switch_start is None:
+                                switch_start = now
+                            elif now - switch_start >= SWITCH_SECONDS:
+                                mode = "HOR"
+                                switch_start = None
+                                action = "-> HOR"
+                        else:
+                            switch_start = None
 
-                both = bool(h_state and v_state)
-                both_held = min(h_held, v_held) if both else 0.0
-                single_held = max(h_held, v_held)
+                if spoken:
+                    speak(spoken)
 
-                if both and both_held >= COMBINED_SECONDS:
-                    word = f"{h_state} {v_state}"
-                    if word not in spoken:
-                        speak(word)
-                        spoken.add(word)
-                elif (h_state or v_state) and single_held >= HINT_SECONDS:
-                    word = h_state if (h_state and h_held >= HINT_SECONDS) else v_state
-                    if word and word not in spoken:
-                        speak(word)
-                        spoken.add(word)
+                held = (now - trig_start) if trig_dir else 0.0
+                sw_held = (now - switch_start) if switch_start else 0.0
 
-                if (h_state or v_state) and single_held >= CONFIRM_SECONDS:
-                    word = (f"{h_state} {v_state}" if both and both_held >= COMBINED_SECONDS
-                            else (h_state if h_held >= HINT_SECONDS else v_state))
-                    confirm = f"{word} confirm"
-                    if confirm not in spoken:
-                        speak(confirm)
-                        spoken.add(confirm)
-
-                # status line shows what each eye decided
-                eye_bits = f"R:{rh or '.'}{rv or '.'} L:{lh or '.'}{lv or '.'}"
-                if not h_state and not v_state:
-                    line = f"centre      {eye_bits:<12} {g}"
-                else:
-                    parts = []
-                    if h_state:
-                        parts.append(f"h:{h_state}({h_held:.1f}s)")
-                    if v_state:
-                        parts.append(f"v:{v_state}({v_held:.1f}s)")
-                    line = (f"{' + '.join(parts):<30} {eye_bits:<12} "
-                            f"{hold_bar(single_held, CONFIRM_SECONDS)} {g}")
+                line = (f"{mode}  c=({m['c'][0]:5.0f},{m['c'][1]:5.0f}) "
+                        f"d=({m['d'][0]:5.0f},{m['d'][1]:5.0f}) "
+                        f"err=({x_err:+6.1f},{y_err:+6.1f}) "
+                        f"{trig_dir or '-':<5} {hold_bar(held, HOLD_SECONDS)} "
+                        f"sw {hold_bar(sw_held, SWITCH_SECONDS)} {action}")
 
                 if line != last_line:
-                    print("\r" + line + " " * 16, end="", flush=True)
+                    print("\r" + line + " " * 8, end="", flush=True)
                     last_line = line
 
-                G.update(r=r_eye, l=l_eye, h_state=h_state, v_state=v_state,
-                         h_held=h_held, v_held=v_held, state=state)
+                G.update(m=m, mode=mode, state=action)
 
             # -------------------------------------------- window
             if show_preview:
                 display = frame.copy()
-                if args.debug and eye_pos is not None:
-                    centres = (cal.centre_r, cal.centre_l) if cal.done() else None
-                    draw_debug(display, eye_pos, centres, args.dx, args.dy)
+                if args.debug and m is not None:
+                    centre = (cal.dx0, cal.dy0) if cal.done() else None
+                    draw_debug(display, m, centre, mode, G["state"])
 
                 cv2.imshow(WIN, display)
                 key = cv2.waitKey(1) & 0xFF
@@ -409,22 +429,22 @@ def main():
 
                 if key in (13, 10):
                     path = save_frame(frame)
-                    print("\n" + "-" * 66)
+                    print("\n" + "-" * 78)
                     print(f"[capture] image : {path if path else 'FAILED to save'}")
-                    if G["r"]:
-                        print(f"[capture] my right eye: ({G['r'][0]:.1f}, {G['r'][1]:.1f})")
-                    if G["l"]:
-                        print(f"[capture] my left  eye: ({G['l'][0]:.1f}, {G['l'][1]:.1f})")
+                    if G["m"] is not None:
+                        mm = G["m"]
+                        print(f"[capture] a left pupil : ({mm['a'][0]:.1f}, {mm['a'][1]:.1f})")
+                        print(f"[capture] b right pupil: ({mm['b'][0]:.1f}, {mm['b'][1]:.1f})")
+                        print(f"[capture] c nose       : ({mm['c'][0]:.1f}, {mm['c'][1]:.1f})")
+                        print(f"[capture] d midpoint   : ({mm['d'][0]:.1f}, {mm['d'][1]:.1f})")
+                        print(f"[capture] d - c        : ({mm['dx']:+.1f}, {mm['dy']:+.1f})")
                     if cal.done():
-                        print(f"[capture] centre: R=({cal.centre_r[0]:.1f}, {cal.centre_r[1]:.1f}) "
-                              f"L=({cal.centre_l[0]:.1f}, {cal.centre_l[1]:.1f})")
-                    print(f"[capture] dx={args.dx:.0f} dy={args.dy:.0f}")
-                    print(f"[capture] state : {G['state']}")
-                    if G["h_state"]:
-                        print(f"[capture] h held: {G['h_held']:.2f}s ({G['h_state']})")
-                    if G["v_state"]:
-                        print(f"[capture] v held: {G['v_held']:.2f}s ({G['v_state']})")
-                    print("-" * 66)
+                        print(f"[capture] resting      : dx0={cal.dx0:+.1f} dy0={cal.dy0:+.1f}")
+                    print(f"[capture] thresholds   : left {args.left_px:.0f} right {args.right_px:.0f} "
+                          f"up {args.up_px:.0f} down {args.down_px:.0f} centre {args.center_px:.0f}")
+                    print(f"[capture] mode         : {G['mode']}")
+                    print(f"[capture] last action  : {G['state']}")
+                    print("-" * 78)
 
                 if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
                     break

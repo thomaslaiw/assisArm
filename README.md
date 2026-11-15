@@ -32,29 +32,39 @@ process — no extra package, no network.
 
 1. MediaPipe Face Mesh with `refine_landmarks=True` gives iris centres.
 2. The image is mirrored first, so the person sees themselves naturally.
-3. Each eye is measured **independently** against its own calibrated centre:
+3. Four points are tracked every frame:
 
    ```
-   x > x0 + dx  -> left        x < x0 - dx  -> right
-   y < y0 - dy  -> up          y > y0 + dy  -> down
+   a = my left pupil      b = my right pupil
+   c = nose tip           d = midpoint of a and b
    ```
 
-4. The two eyes are merged per axis:
+4. Calibration records the resting offset of `d` from `c`:
 
-   | right eye | left eye | result |
-   |---|---|---|
-   | left | left | left |
-   | left | neutral | left |
-   | neutral | neutral | centre |
-   | left | right | centre (they disagree) |
+   ```
+   dx0 = d.x - c.x        dy0 = d.y - c.y
+   ```
 
-5. Dwell timing turns a state into speech:
+   Because `c` is the nose, the offsets survive the head moving — the nose
+   shifts with the pupils, so the difference stays put.
 
-   | held | speaks |
-   |---|---|
-   | 2 s, one axis | `left` / `right` / `up` / `down` |
-   | 3 s, both axes | `left up`, `right down`, … |
-   | 5 s | `<state> confirm` |
+5. A **mode switch** decides which axis is live:
+
+   ```
+   HOR (default)
+     d.x - c.x > dx0 + 10  held 1s -> speak "left",  cooldown 1s
+     d.x - c.x < dx0 - 10  held 1s -> speak "right", cooldown 1s
+     |d.x - c.x - dx0| <= 10 held 1s -> switch to VER
+
+   VER
+     d.y - c.y - dy0 < -10 held 1s -> speak "up",    cooldown 1s
+     d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 1s
+     |d.y - c.y - dy0| <= 10 held 1s -> switch to HOR
+   ```
+
+   Only the active axis is evaluated, so a diagonal glance cannot fire both
+   directions at once. Returning the eyes to the centre band for one second
+   hands control to the other axis.
 
 ## Usage
 
@@ -64,28 +74,30 @@ Calibrate (look straight ahead when prompted):
 python eye_test.py --debug
 ```
 
-It prints the centre of each eye:
+It prints the resting offset:
 
 ```
-centre: my right eye = (700.5, 268.0)
-        my left  eye = (470.2, 265.5)
+resting offset d-c: dx0=-232.5  dy0=-38.2 (90 frames)
 ```
 
 Reuse those numbers so calibration is skipped:
 
 ```
-python eye_test.py --lx0 470.2 --ly0 265.5 --rx0 700.5 --ry0 268.0 --dx 100 --dy 20
+python eye_test.py --dx0 -232.5 --dy0 -38.2 --debug
 ```
 
 | flag | meaning |
 |---|---|
-| `--lx0 --ly0` | centre of your left eye, pixels |
-| `--rx0 --ry0` | centre of your right eye, pixels |
-| `--dx` | horizontal travel needed to count as left/right (default 100) |
-| `--dy` | vertical travel needed to count as up/down (default 20) |
-| `--debug` | draw pupils, centres and decision bands on the preview |
+| `--dx0 --dy0` | resting offset of the pupil midpoint from the nose |
+| `--left-px` | travel needed to count as left (default 10) |
+| `--right-px` | travel needed to count as right (default 10) |
+| `--up-px` | travel needed to count as up (default 10) |
+| `--down-px` | travel needed to count as down (default 5) |
+| `--center-px` | band that hands control to the other axis (default 10) |
+| `--flip-y` | invert up/down if the camera orientation needs it |
+| `--debug` | draw a, b, c, d, the resting point and the bands |
 | `--no-preview` | run headless |
-| `--calib` | force calibration even when centres are given |
+| `--calib` | force calibration even when offsets are given |
 
 Keys while running:
 
