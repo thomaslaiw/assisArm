@@ -25,12 +25,13 @@ DIRECTIONS
         x greater than dx0 + LEFT_PX   -> left
         x less    than dx0 - RIGHT_PX  -> right
         y less    than dy0 - UP_PX     -> up
-        (e.y - c.y) less than ey0 - DOWN_E_PX -> down
+        x inside the centre band and the eyes half shut -> down
 
-    Point e is the midpoint of the upper eyelids, so it sits on the same
-    horizontal line as a, b, c and d. Calibration records ey0 = e.y - c.y.
-    Lowering the eyelids by DOWN_E_PX pixels from rest reads as down, which
-    is far steadier than trying to measure how far the eyes are shut.
+    "Half shut" means the eyelid gap has fallen below HALF_EYE_RATIO of the
+    gap measured during calibration, so it follows your own eye shape rather
+    than a fixed pixel count. Half shutting only becomes "down" when the
+    horizontal error is already inside the centre band; otherwise the normal
+    left/right test still wins.
     Holding a direction for HOLD_SECONDS speaks it. Keeping the eyes in that
     same zone for another CONFIRM_SECONDS without a blink makes the speaker
     say "confirm".
@@ -75,10 +76,10 @@ CALIB_WAIT_SECONDS = 2.0
 CALIB_SECONDS = 3.0
 
 # ---- gaze thresholds, pixels of travel from the calibrated centre
-LEFT_PX = 10.0
-RIGHT_PX = 10.0
-UP_PX = 10.0
-DOWN_PX = 5.0
+LEFT_PX = 12.0
+RIGHT_PX = 12.0
+UP_PX = 8.0
+DOWN_PX = 10.0
 CENTER_PX = 10.0          # inside this band counts as no direction
 
 # ---- blink bands, seconds
@@ -86,8 +87,8 @@ SHORT_MIN = 0.05
 SHORT_MAX = 0.30
 LONG_MIN = 0.50
 
-# ---- eyelids dropping means "down"
-DOWN_E_PX = 5.0        # upper eyelid y travel from rest that counts as down
+# ---- half shut eyes mean "down"
+HALF_EYE_RATIO = 0.5   # eyelid gap below this fraction of the calibrated gap
 
 # ---- eye aspect ratio, used to decide open or shut
 EAR_OPEN = 0.150
@@ -158,14 +159,8 @@ def measure(landmarks, w, h):
     c = (landmarks[NOSE_TIP].x * w, landmarks[NOSE_TIP].y * h)
     d = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
 
-    # e = midpoint of the upper eyelids, on the same line as a, b, c and d
-    upper_ids = EYE_LIDS["left"][0] + EYE_LIDS["right"][0]
-    e = (sum(landmarks[i].x for i in upper_ids) / len(upper_ids) * w,
-         sum(landmarks[i].y for i in upper_ids) / len(upper_ids) * h)
-
-    return {"a": a, "b": b, "c": c, "d": d, "e": e,
-            "dx": d[0] - c[0], "dy": d[1] - c[1],
-            "ey": e[1] - c[1]}
+    return {"a": a, "b": b, "c": c, "d": d,
+            "dx": d[0] - c[0], "dy": d[1] - c[1]}
 
 
 def eye_aspect_ratio(landmarks, upper, lower, corner_a, corner_b, w, h):
@@ -202,8 +197,7 @@ def draw_points(frame, m, centre):
     for key, colour, label in (("a", (0, 255, 0), "a"),
                                ("b", (0, 0, 255), "b"),
                                ("c", (255, 0, 255), "c"),
-                               ("d", (255, 255, 0), "d"),
-                               ("e", (255, 160, 60), "e")):
+                               ("d", (255, 255, 0), "d")):
         x, y = int(m[key][0]), int(m[key][1])
         cv2.drawMarker(frame, (x, y), colour, cv2.MARKER_CROSS, 16, 2)
         cv2.putText(frame, label, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX,
@@ -213,8 +207,6 @@ def draw_points(frame, m, centre):
              (int(m["d"][0]), int(m["d"][1])), (150, 150, 150), 1)
     cv2.line(frame, (int(m["a"][0]), int(m["a"][1])),
              (int(m["b"][0]), int(m["b"][1])), (90, 90, 90), 1)
-    cv2.line(frame, (int(m["e"][0]), int(m["e"][1])),
-             (int(m["c"][0]), int(m["c"][1])), (160, 120, 60), 1)
 
     if centre is None:
         return
@@ -304,7 +296,6 @@ def draw_numbers(frame, m, centre, x_err, y_err, direction, held):
     if m is not None:
         lines.append(f"c=({m['c'][0]:.0f},{m['c'][1]:.0f})  d=({m['d'][0]:.0f},{m['d'][1]:.0f})")
         lines.append(f"d-c=({m['dx']:+.1f},{m['dy']:+.1f})")
-        lines.append(f"e-c y={m['ey']:+.1f}")
         if centre is not None:
             lines.append(f"err=({x_err:+.1f},{y_err:+.1f})")
     else:
@@ -333,8 +324,7 @@ def draw_calibration(frame, label, progress, m):
 
     if m is not None:
         cv2.putText(frame,
-                    f"c=({m['c'][0]:.0f},{m['c'][1]:.0f}) d=({m['d'][0]:.0f},{m['d'][1]:.0f}) "
-                    f"e-c y={m['ey']:+.1f}",
+                    f"c=({m['c'][0]:.0f},{m['c'][1]:.0f}) d=({m['d'][0]:.0f},{m['d'][1]:.0f})",
                     (16, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
 
@@ -346,10 +336,10 @@ class RestCalibration:
         self.prompt_at = None
         self.record_start = None
         self.samples = []
-        self.ey_samples = []
+        self.height_samples = []
         self.dx0 = None
         self.dy0 = None
-        self.ey0 = None
+        self.eye_h0 = None
 
     def needs_prompt(self):
         return self.prompt_at is None
@@ -369,27 +359,29 @@ class RestCalibration:
 
         if m is not None:
             self.samples.append((m["dx"], m["dy"]))
-            self.ey_samples.append(m["ey"])
+        if eyes is not None:
+            self.height_samples.append((eyes["hgt_l"] + eyes["hgt_r"]) / 2.0)
 
         if progress >= 1.0 and self.samples:
             xs = sorted(p[0] for p in self.samples)
             ys = sorted(p[1] for p in self.samples)
             self.dx0 = xs[len(xs) // 2]
             self.dy0 = ys[len(ys) // 2]
-            if self.ey_samples:
-                es = sorted(self.ey_samples)
-                self.ey0 = es[len(es) // 2]
+            if self.height_samples:
+                hs = sorted(self.height_samples)
+                self.eye_h0 = hs[len(hs) // 2]
 
         return "RECORDING CENTRE", min(1.0, progress)
 
     def done(self):
         return self.dx0 is not None and self.dy0 is not None
 
-    def lids_lowered(self, m):
-        """True when the upper eyelids have dropped DOWN_E_PX below rest."""
-        if m is None or self.ey0 is None:
+    def half_shut(self, eyes):
+        """True when the eyelid gap has fallen below HALF_EYE_RATIO of rest."""
+        if eyes is None or not self.eye_h0:
             return False
-        return m["ey"] < self.ey0 - DOWN_E_PX
+        h = (eyes["hgt_l"] + eyes["hgt_r"]) / 2.0
+        return h < self.eye_h0 * HALF_EYE_RATIO
 
 
 def save_frame(frame):
@@ -402,12 +394,12 @@ def save_frame(frame):
         return None
 
 
-def direction_of(x_err, y_err, flip_y, lids_down=False):
+def direction_of(x_err, y_err, flip_y, half_shut=False):
     """
     Pick the dominant axis. Returns '', 'left', 'right', 'up' or 'down'.
 
-    "down" comes from the eyelids dropping, not from the pupils sinking, so it
-    is tested separately from the vertical pupil travel.
+    Half shutting the eyes only counts as "down" while the horizontal error is
+    already inside the centre band, so a sideways glance always wins.
     """
     if flip_y:
         y_err = -y_err
@@ -418,16 +410,17 @@ def direction_of(x_err, y_err, flip_y, lids_down=False):
     elif x_err < -RIGHT_PX:
         horiz = "right"
 
+    if half_shut and not horiz and abs(x_err) <= CENTER_PX:
+        return "down"
+
     vert = ""
     if y_err < -UP_PX:
         vert = "up"
-    if lids_down:
+    elif y_err > DOWN_PX:
         vert = "down"
 
     # one axis at a time: whichever error is larger wins
     if horiz and vert:
-        if vert == "down":
-            return horiz if abs(x_err) >= DOWN_E_PX else vert
         return horiz if abs(x_err) >= abs(y_err) else vert
     return horiz or vert
 
@@ -634,7 +627,7 @@ def main():
 
                 if sys_on and not eyes_closed:
                     new_dir = direction_of(x_err, y_err, args.flip_y,
-                                           cal.lids_lowered(m))
+                                           cal.half_shut(eyes))
                 else:
                     new_dir = ""
 
