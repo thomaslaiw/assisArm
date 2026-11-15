@@ -18,20 +18,18 @@ GAZE (only while the system is ON and not busy)
       d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 1s
       |d.y - c.y - dy0| <= 10 held 1s -> switch to HOR
 
-BLINKS
-    A blink is an eye closure that lasts at least BLINK_MIN seconds.
-    Three blinks inside TRIPLE_WINDOW seconds toggle the system on or off.
-    The triple-blink counter is only live while the system is ON, nothing is
-    cooling down, and we are not in a fetch/back cycle.
-
-    Inside the 1s cooldown that follows a spoken direction:
-      - close the eyes >= BLINK_MIN, then open  -> speak "confirm",
-        which starts a fresh 1s window
-      - inside that confirm window, start closing the eyes and keep them
-        shut past FETCH_MIN seconds -> speak "fetch" and stay quiet until
-        the eyes open, then speak "back" and cool down for as long as the
-        eyes were shut
-    A fetch can only follow a confirm; it is never triggered directly.
+BLINKS - three non-overlapping bands, so the gestures never collide
+    0.10 - 0.30 s  short blink -> "confirm"
+                   only inside the 1s cooldown after a spoken direction.
+                   It opens a fresh 1s window in which a fetch may start.
+    0.30 - 0.50 s  dead zone, ignored (the width of an ordinary blink)
+    0.50 s and up  long blink, feeds the triple-blink toggle: three of them
+                   inside 5s switch the system on or off. Only counted while
+                   ON, not cooling down, and not in a fetch/back cycle.
+    1.20 s and up  fetch, but only if the closure STARTED inside the confirm
+                   window. Stays quiet until the eyes open, then speaks
+                   "back" and cools down for as long as the eyes were shut.
+    A fetch can only follow a confirm; it is never triggered on its own.
 
 This build prints nothing to the console: everything is drawn on the preview.
 Use eye_test_verbose.py when the numbers are needed for tuning.
@@ -71,10 +69,18 @@ CENTER_PX = 10.0      # back within this band switches mode
 EAR_OPEN = 0.150      # above this the eyes count as open
 EAR_CLOSED = 0.090    # below this the eyes count as closed
 
-BLINK_MIN = 0.5       # a closure this long counts as a blink
 TRIPLE_WINDOW = 5.0   # three blinks inside this window toggle the system
 FETCH_MIN = 1.2       # a closure this long, inside the confirm window, is a fetch
 CONFIRM_WINDOW = 1.0  # how long after "confirm" a fetch may start
+
+# Three non-overlapping closure bands, so the gestures cannot collide:
+#   0.10 - 0.30 s  short blink -> confirm (only inside a direction cooldown)
+#   0.30 - 0.50 s  dead zone   -> ignored, the width of an ordinary blink
+#   0.50 s and up  long blink  -> counted towards the triple-blink toggle
+#   1.20 s and up  very long   -> fetch (only if it STARTS inside the confirm window)
+SHORT_MIN = 0.10      # shortest closure that counts as a short blink
+SHORT_MAX = 0.30      # longest closure that still counts as a short blink
+LONG_MIN = 0.50       # a closure this long feeds the triple-blink counter
 
 VIEW_W, VIEW_H = 1280, 720
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -373,8 +379,12 @@ def parse_args():
                    help="EAR above this counts as open")
     p.add_argument("--ear-closed", type=float, default=EAR_CLOSED,
                    help="EAR below this counts as closed")
-    p.add_argument("--blink-min", type=float, default=BLINK_MIN,
-                   help="closure length that counts as a blink")
+    p.add_argument("--short-min", type=float, default=SHORT_MIN,
+                   help="shortest closure that counts as a confirm blink")
+    p.add_argument("--short-max", type=float, default=SHORT_MAX,
+                   help="longest closure that still counts as a confirm blink")
+    p.add_argument("--long-min", type=float, default=LONG_MIN,
+                   help="closure length that feeds the triple-blink counter")
     p.add_argument("--fetch-min", type=float, default=FETCH_MIN,
                    help="closure length that counts as a fetch")
     p.add_argument("--flip-y", action="store_true", help="invert the up/down test")
@@ -386,15 +396,25 @@ def parse_args():
 
 
 def main():
-    global EAR_OPEN, EAR_CLOSED, BLINK_MIN, FETCH_MIN
+    global EAR_OPEN, EAR_CLOSED, SHORT_MIN, SHORT_MAX, LONG_MIN, FETCH_MIN
     args = parse_args()
 
     EAR_OPEN = args.ear_open
     EAR_CLOSED = args.ear_closed
     if EAR_CLOSED >= EAR_OPEN:
         EAR_CLOSED = EAR_OPEN - 0.02
-    BLINK_MIN = args.blink_min
+
+    SHORT_MIN = args.short_min
+    SHORT_MAX = args.short_max
+    LONG_MIN = args.long_min
     FETCH_MIN = args.fetch_min
+    # keep the three bands sane and non-overlapping
+    if SHORT_MAX <= SHORT_MIN:
+        SHORT_MAX = SHORT_MIN + 0.05
+    if LONG_MIN <= SHORT_MAX:
+        LONG_MIN = SHORT_MAX + 0.05
+    if FETCH_MIN <= LONG_MIN:
+        FETCH_MIN = LONG_MIN + 0.2
 
     fixed = None
     if not args.calib and args.dx0 is not None and args.dy0 is not None:
@@ -488,8 +508,12 @@ def main():
 
             else:
                 # ---------------------------------------- blink bookkeeping
-                # a blink completes when the eyes reopen after >= BLINK_MIN closed
-                completed_blink = False
+                # classify the closure that just ended:
+                #   0.10-0.30 s -> short blink (confirm)
+                #   0.30-0.50 s -> dead zone, ignored
+                #   >= 0.50 s   -> long blink (feeds the triple counter)
+                short_blink = False       # 0.10-0.30 s -> confirm
+                long_blink = False        # >= 0.50 s  -> triple-blink counter
                 closed_for = 0.0
                 if eyes_closed:
                     if close_start == 0.0:
@@ -498,8 +522,11 @@ def main():
                 else:
                     if close_start != 0.0:
                         closed_for = now - close_start
-                        if closed_for >= BLINK_MIN:
-                            completed_blink = True
+                        if SHORT_MIN <= closed_for <= SHORT_MAX:
+                            short_blink = True
+                        elif closed_for >= LONG_MIN:
+                            long_blink = True
+                        # 0.30-0.50 s is the dead zone: deliberately ignored
                         close_start = 0.0
 
                 # fetch: only possible inside the confirm window
@@ -529,8 +556,8 @@ def main():
                     action = "back cooldown"
                     trig_dir, trig_start, switch_start = None, 0.0, None
 
-                elif completed_blink and now < cooldown_until:
-                    # blink inside the direction cooldown -> confirm
+                elif short_blink and now < cooldown_until:
+                    # short blink inside the direction cooldown -> confirm
                     speak("confirm")
                     cooldown_until = now + COOLDOWN_SECONDS
                     confirm_until = now + CONFIRM_WINDOW
@@ -547,7 +574,7 @@ def main():
                     busy = ""
 
                     # -------------------------------- triple blink toggles the system
-                    if completed_blink:
+                    if long_blink:
                         blink_times.append(now)
                     blink_times = [t for t in blink_times if now - t <= TRIPLE_WINDOW]
                     if len(blink_times) >= 3:
