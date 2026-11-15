@@ -22,10 +22,11 @@ BLINKS - three non-overlapping bands, so the gestures never collide
     0.10 - 0.30 s  short blink -> "confirm"
                    only inside the 1s cooldown after a spoken direction.
                    It opens a fresh 1s window in which a fetch may start.
+                   Short blinks are counted forever on the overlay.
     0.30 - 0.50 s  dead zone, ignored (the width of an ordinary blink)
-    0.50 s and up  long blink, feeds the triple-blink toggle: three of them
-                   inside 5s switch the system on or off. Only counted while
-                   ON, not cooling down, and not in a fetch/back cycle.
+    0.50 s and up  long blink. Three of them toggle the system on or off.
+                   The count resets when no long blink arrives for 3 s, or
+                   after a toggle. Only counted while ON and not cooling down.
     1.20 s and up  fetch, but only if the closure STARTED inside the confirm
                    window. Stays quiet until the eyes open, then speaks
                    "back" and cools down for as long as the eyes were shut.
@@ -69,7 +70,7 @@ CENTER_PX = 10.0      # back within this band switches mode
 EAR_OPEN = 0.150      # above this the eyes count as open
 EAR_CLOSED = 0.090    # below this the eyes count as closed
 
-TRIPLE_WINDOW = 5.0   # three blinks inside this window toggle the system
+TRIPLE_GAP = 3.0      # a long blink older than this is dropped from the count
 FETCH_MIN = 1.2       # a closure this long, inside the confirm window, is a fetch
 CONFIRM_WINDOW = 1.0  # how long after "confirm" a fetch may start
 
@@ -259,19 +260,24 @@ def draw_ear(frame, eyes, closed):
         cv2.line(frame, (tx, bar_y - 3), (tx, bar_y + bar_h + 3), tick, 1)
 
 
-def draw_blink_state(frame, blinks, busy):
-    """Third line in the EAR box area: triple-blink progress and busy flag."""
+def draw_blink_state(frame, short_count, long_count, busy):
+    """Blink counters: short accumulates forever, long resets after 3s idle."""
     h, w = frame.shape[:2]
     x0 = w - 230
     y0 = 96
 
-    cv2.rectangle(frame, (x0 - 8, y0 - 4), (w - 8, y0 + 24), (35, 35, 35), -1)
-    dots = "".join("*" if i < blinks else "." for i in range(3))
-    label = f"blink {dots}"
-    if busy:
-        label += f"  {busy}"
-    cv2.putText(frame, label, (x0, y0 + 16),
+    cv2.rectangle(frame, (x0 - 8, y0 - 4), (w - 8, y0 + 52), (35, 35, 35), -1)
+
+    cv2.putText(frame, f"short {short_count}", (x0, y0 + 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 220, 255), 1)
+
+    dots = "".join("*" if i < long_count else "." for i in range(3))
+    cv2.putText(frame, f"long  {dots}", (x0, y0 + 36),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 210, 120), 1)
+
+    if busy:
+        cv2.putText(frame, busy, (x0, y0 + 66),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
 
 def draw_numbers(frame, m, centre, x_err, y_err, trig_dir, held, sw_held, action):
@@ -450,11 +456,13 @@ def main():
     # ---- blink bookkeeping
     eyes_closed = False
     close_start = 0.0
-    blink_times = []              # timestamps of completed blinks
-    confirm_until = 0.0           # window in which a fetch may begin
+    short_count = 0               # short blinks, accumulates forever
+    long_count = 0                # long blinks, resets after TRIPLE_GAP idle
+    last_long_at = 0.0
+    confirm_until = 0.0
     fetch_active = False
     fetch_close_start = 0.0
-    back_cooldown_until = 0.0     # set after "back"
+    back_cooldown_until = 0.0
 
     m = None
     eyes = None
@@ -524,10 +532,15 @@ def main():
                         closed_for = now - close_start
                         if SHORT_MIN <= closed_for <= SHORT_MAX:
                             short_blink = True
+                            short_count += 1
                         elif closed_for >= LONG_MIN:
                             long_blink = True
                         # 0.30-0.50 s is the dead zone: deliberately ignored
                         close_start = 0.0
+
+                # a long blink older than TRIPLE_GAP drops the whole count
+                if long_count and (now - last_long_at) > TRIPLE_GAP:
+                    long_count = 0
 
                 # fetch: only possible inside the confirm window
                 if (not fetch_active and eyes_closed
@@ -561,9 +574,9 @@ def main():
                     speak("confirm")
                     cooldown_until = now + COOLDOWN_SECONDS
                     confirm_until = now + CONFIRM_WINDOW
+                    long_count = 0
                     busy = f"confirm {CONFIRM_WINDOW:.0f}s"
                     action = "confirm: fetch window open"
-                    blink_times.clear()
 
                 elif now < cooldown_until:
                     busy = f"cooldown {cooldown_until - now:.1f}s"
@@ -575,10 +588,10 @@ def main():
 
                     # -------------------------------- triple blink toggles the system
                     if long_blink:
-                        blink_times.append(now)
-                    blink_times = [t for t in blink_times if now - t <= TRIPLE_WINDOW]
-                    if len(blink_times) >= 3:
-                        blink_times.clear()
+                        long_count += 1
+                        last_long_at = now
+                    if long_count >= 3:
+                        long_count = 0
                         sys_on = not sys_on
                         speak("on" if sys_on else "off")
                         cooldown_until = now + COOLDOWN_SECONDS
@@ -672,7 +685,7 @@ def main():
                                        action, eyes_closed, sys_on, bool(busy))
                             draw_eye_points(display, lm, w, h)
                             draw_ear(display, eyes, eyes_closed)
-                            draw_blink_state(display, len(blink_times), busy)
+                            draw_blink_state(display, short_count, long_count, busy)
                             draw_numbers(display, m, (cal.dx0, cal.dy0),
                                          x_err, y_err, trig_dir, held, sw_held, action)
                         else:
