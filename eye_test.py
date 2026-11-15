@@ -1,5 +1,6 @@
 """
-Eye tracking with a mode switch between horizontal and vertical.
+Eye tracking with a mode switch between horizontal and vertical,
+plus closed-eye detection.
 
 Points:
     a = my left pupil        b = my right pupil
@@ -18,8 +19,11 @@ VER mode
     d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 1s
     |d.y - c.y - dy0| <= 10 held 1s -> switch to HOR
 
-The active mode is checked first, so HOR looks at x before y and vice versa.
-Cooldown blocks all detection for 1 second after any utterance.
+Closed-eye detection uses the eye aspect ratio (EAR = lid gap / eye width).
+    EAR above the open threshold -> eyes open
+    EAR below the closed threshold -> eyes closed
+While the eyes are closed the gaze state is frozen: no timers advance, no
+speech fires, and the mode does not switch. This is display-only for now.
 
 This build prints nothing to the console: everything is drawn on the preview.
 Use eye_test_verbose.py when the numbers are needed for tuning.
@@ -55,6 +59,10 @@ RIGHT_PX = 10.0       # ...or this far right
 UP_PX = 10.0          # d must rise this much
 DOWN_PX = 5.0         # d must fall this much
 CENTER_PX = 10.0      # back within this band switches mode
+
+EAR_OPEN = 0.150      # above this the eyes count as open
+EAR_CLOSED = 0.090    # below this the eyes count as closed
+EAR_HYSTERESIS_GAP = EAR_OPEN - EAR_CLOSED
 
 VIEW_W, VIEW_H = 1280, 720
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -93,6 +101,12 @@ MY_RIGHT_EYE_IRIS = [468, 469, 470, 471, 472]
 MY_LEFT_EYE_IRIS = [473, 474, 475, 476, 477]
 NOSE_TIP = 1
 
+# eyelid landmarks: (upper lid ids, lower lid ids, corner a, corner b)
+EYE_LIDS = {
+    "left": ([386, 385, 387], [374, 380, 373], 362, 263),   # your left eye
+    "right": ([159, 158, 160], [145, 153, 144], 133, 33),   # your right eye
+}
+
 
 def measure(landmarks, w, h):
     """a, b, c, d in pixels plus the offsets we care about."""
@@ -109,8 +123,40 @@ def measure(landmarks, w, h):
             "dx": d[0] - c[0], "dy": d[1] - c[1]}
 
 
-def draw_debug(frame, m, centre, mode, state_msg, calib_label, calib_progress):
-    """Everything the console used to say, drawn on the frame instead."""
+def eye_aspect_ratio(landmarks, upper, lower, corner_a, corner_b, w, h):
+    """EAR = mean vertical lid gap / horizontal eye width."""
+    up_y = sum(landmarks[i].y for i in upper) / len(upper) * h
+    lo_y = sum(landmarks[i].y for i in lower) / len(lower) * h
+    height = abs(lo_y - up_y)
+
+    ax, ay = landmarks[corner_a].x * w, landmarks[corner_a].y * h
+    bx, by = landmarks[corner_b].x * w, landmarks[corner_b].y * h
+    width = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+    return height / max(1e-6, width), height, width
+
+
+def measure_eyes(landmarks, w, h):
+    """EAR for each eye plus the mean, which drives the closed detection."""
+    ear_l, hgt_l, wid_l = eye_aspect_ratio(landmarks, *EYE_LIDS["left"], w, h)
+    ear_r, hgt_r, wid_r = eye_aspect_ratio(landmarks, *EYE_LIDS["right"], w, h)
+    return {"ear_l": ear_l, "ear_r": ear_r, "ear": (ear_l + ear_r) / 2.0,
+            "hgt_l": hgt_l, "hgt_r": hgt_r,
+            "wid_l": wid_l, "wid_r": wid_r}
+
+
+def eyes_closed_state(ear, was_closed):
+    """
+    Hysteresis so a single noisy frame cannot flip the state.
+    Returns True when the eyes should be treated as closed.
+    """
+    if was_closed:
+        return ear < EAR_OPEN                 # stay closed until clearly open
+    return ear < EAR_CLOSED                   # only close below the lower bound
+
+
+def draw_debug(frame, m, centre, mode, state_msg, closed):
+    """a, b, c, d, the resting centre, the decision bands and the eye state."""
     h, w = frame.shape[:2]
 
     for key, colour, label in (("a", (0, 255, 0), "a"),
@@ -136,12 +182,59 @@ def draw_debug(frame, m, centre, mode, state_msg, calib_label, calib_progress):
         for yy in (int(cy - UP_PX), int(cy + DOWN_PX)):
             cv2.line(frame, (0, yy), (w, yy), (200, 160, 80), 1)
 
+    mode_colour = (0, 255, 0) if mode == "HOR" else (0, 200, 255)
+    if closed:
+        mode_colour = (90, 90, 90)
     cv2.putText(frame, f"mode {mode}", (12, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                (0, 255, 0) if mode == "HOR" else (0, 200, 255), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, mode_colour, 2)
     if state_msg:
         cv2.putText(frame, state_msg, (12, 58),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+    if closed:
+        cv2.putText(frame, "EYES CLOSED", (12, 88),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+
+def draw_eye_points(frame, landmarks, w, h):
+    """Mark the lid and corner points used for the eye aspect ratio."""
+    for upper, lower, ca, cb in EYE_LIDS.values():
+        for i in upper:
+            x, y = int(landmarks[i].x * w), int(landmarks[i].y * h)
+            cv2.circle(frame, (x, y), 2, (0, 255, 0), -1)
+        for i in lower:
+            x, y = int(landmarks[i].x * w), int(landmarks[i].y * h)
+            cv2.circle(frame, (x, y), 2, (0, 0, 255), -1)
+        for i in (ca, cb):
+            x, y = int(landmarks[i].x * w), int(landmarks[i].y * h)
+            cv2.circle(frame, (x, y), 3, (255, 255, 0), -1)
+
+
+def draw_ear(frame, eyes, closed):
+    """Top-right EAR box with a bar that shows where the thresholds sit."""
+    h, w = frame.shape[:2]
+    x0 = w - 230
+    y0 = 12
+
+    cv2.rectangle(frame, (x0 - 8, y0 - 4), (w - 8, y0 + 78), (35, 35, 35), -1)
+
+    colour = (0, 0, 255) if closed else (0, 255, 120)
+    cv2.putText(frame, f"EAR L {eyes['ear_l']:.3f}", (x0, y0 + 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1)
+    cv2.putText(frame, f"EAR R {eyes['ear_r']:.3f}", (x0, y0 + 36),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1)
+    cv2.putText(frame, f"mean  {eyes['ear']:.3f}  {'CLOSED' if closed else 'open'}",
+                (x0, y0 + 56), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+    # bar: EAR 0.0 -> 0.40 across 140 px, with the two thresholds marked
+    bar_x, bar_y, bar_w, bar_h = x0, y0 + 62, 140, 8
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (70, 70, 70), -1)
+    frac = max(0.0, min(1.0, eyes["ear"] / 0.40))
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + int(bar_w * frac), bar_y + bar_h),
+                  colour, -1)
+    for thr, tick in ((EAR_CLOSED, (0, 0, 255)), (EAR_OPEN, (0, 255, 0))):
+        tx = bar_x + int(bar_w * min(1.0, thr / 0.40))
+        cv2.line(frame, (tx, bar_y - 3), (tx, bar_y + bar_h + 3), tick, 1)
 
 
 def draw_numbers(frame, m, centre, x_err, y_err, trig_dir, held, sw_held, action):
@@ -247,6 +340,10 @@ def parse_args():
     p.add_argument("--up-px", type=float, default=UP_PX)
     p.add_argument("--down-px", type=float, default=DOWN_PX)
     p.add_argument("--center-px", type=float, default=CENTER_PX)
+    p.add_argument("--ear-open", type=float, default=EAR_OPEN,
+                   help="EAR above this counts as open")
+    p.add_argument("--ear-closed", type=float, default=EAR_CLOSED,
+                   help="EAR below this counts as closed")
     p.add_argument("--flip-y", action="store_true", help="invert the up/down test")
     p.add_argument("--calib", action="store_true", help="calibrate even if dx0/dy0 given")
     p.add_argument("--no-preview", action="store_true", help="run headless")
@@ -256,7 +353,15 @@ def parse_args():
 
 
 def main():
+    global EAR_OPEN, EAR_CLOSED
     args = parse_args()
+
+    if args.ear_open is not None:
+        EAR_OPEN = args.ear_open
+    if args.ear_closed is not None:
+        EAR_CLOSED = args.ear_closed
+    if EAR_CLOSED >= EAR_OPEN:
+        EAR_CLOSED = EAR_OPEN - 0.02
 
     fixed = None
     if not args.calib and args.dx0 is not None and args.dy0 is not None:
@@ -281,6 +386,7 @@ def main():
 
     mode = "HOR"
     calib_announced = False
+    eyes_closed = False
 
     trig_dir = None
     trig_start = 0.0
@@ -288,6 +394,7 @@ def main():
     cooldown_until = 0.0
 
     m = None
+    eyes = None
     action = "-"
     x_err = y_err = 0.0
     held = sw_held = 0.0
@@ -299,13 +406,18 @@ def main():
                 break
 
             frame = cv2.flip(frame, 1)
+            h, w = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result = face_mesh.process(rgb)
 
             m = None
+            eyes = None
+            lm = None
             if result.multi_face_landmarks:
                 lm = result.multi_face_landmarks[0].landmark
-                m = measure(lm, frame.shape[1], frame.shape[0])
+                m = measure(lm, w, h)
+                eyes = measure_eyes(lm, w, h)
+                eyes_closed = eyes_closed_state(eyes["ear"], eyes_closed)
 
             now = time.time()
             cooling = now < cooldown_until
@@ -317,10 +429,17 @@ def main():
                 label, progress = cal.feed(m, now)
                 if show_preview and not args.plain:
                     draw_calibration(frame, label, max(0.0, progress), m)
+                    if eyes is not None:
+                        draw_ear(frame, eyes, eyes_closed)
 
             elif m is None:
                 trig_dir, trig_start, switch_start = None, 0.0, None
                 action = "no face"
+
+            elif eyes_closed:
+                # gaze is frozen while the eyes are shut: no timers, no speech
+                trig_dir, trig_start, switch_start = None, 0.0, None
+                action = f"eyes closed (EAR {eyes['ear']:.3f})"
 
             else:
                 if not calib_announced:
@@ -409,14 +528,15 @@ def main():
                 if not args.plain:
                     if cal.done():
                         if m is not None:
-                            draw_debug(display, m, (cal.dx0, cal.dy0), mode, action, None, 0)
+                            draw_debug(display, m, (cal.dx0, cal.dy0), mode,
+                                       action, eyes_closed)
+                            draw_eye_points(display, lm, w, h)
+                            draw_ear(display, eyes, eyes_closed)
                             draw_numbers(display, m, (cal.dx0, cal.dy0),
                                          x_err, y_err, trig_dir, held, sw_held, action)
                         else:
                             cv2.putText(display, "no face", (12, 28),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                            cv2.putText(display, f"mode {mode}", (12, 58),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
 
                 cv2.imshow(WIN, display)
                 key = cv2.waitKey(1) & 0xFF
