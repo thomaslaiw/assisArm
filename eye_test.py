@@ -25,14 +25,16 @@ DIRECTIONS
         x less    than dx0 - RIGHT_PX  -> right
         y less    than dy0 - UP_PX     -> up
         y greater than dy0 + DOWN_PX   -> down
-    Holding a direction for HOLD_SECONDS speaks it. Keeping the eyes on that
-    same direction for another CONFIRM_SECONDS without a blink makes the
-    speaker say "confirm".
+    Holding a direction for HOLD_SECONDS speaks it. Keeping the eyes in that
+    same zone for another CONFIRM_SECONDS without a blink makes the speaker
+    say "confirm".
 
-    While the speaker is talking the direction is not re-evaluated, so the
-    word and the confirm never overlap. After a confirm the system waits: it
-    stays locked until the eyes return to the centre band, which releases the
-    lock and arms the next direction.
+    Leaving the zone - into another direction or back to the centre - wipes
+    the slate. Nothing is remembered between visits, so:
+        left  -> "left" -> stay 2s -> "confirm" -> leave -> left -> "left" ...
+        left  -> "left" -> leave early -> nothing, the visit never counted
+    A confirm also drops the zone immediately, so the eyes have to leave and
+    return before that direction can be spoken a second time.
 
 This build prints nothing to the console: everything is drawn on the preview.
 Use eye_test_verbose.py when the numbers are needed for tuning.
@@ -476,8 +478,6 @@ def main():
     direction = ""
     dir_start = 0.0
     spoken_direction = ""
-    confirmed_for = ""
-    confirm_done = False
 
     m = None
     eyes = None
@@ -561,7 +561,7 @@ def main():
                         speak("on" if sys_on else "off")
                         status = f"system {'on' if sys_on else 'off'}"
                         direction, dir_start = "", 0.0
-                        spoken_direction, confirmed_for, confirm_done = "", "", False
+                        spoken_direction = ""
 
                 # -------------------------------- short blink pairs: fetch
                 if short_blink and sys_on and not speaker_busy(now):
@@ -578,7 +578,7 @@ def main():
                             fetch_ready_until = now + 3.0
                             status = "fetch"
                         direction, dir_start = "", 0.0
-                        spoken_direction, confirmed_for, confirm_done = "", "", False
+                        spoken_direction = ""
                     else:
                         short_pair_pending = True
                         last_short_at = now
@@ -592,43 +592,41 @@ def main():
                 else:
                     new_dir = ""
 
+                # Entering a zone starts its clock. Leaving it, into another
+                # zone or back to the centre, wipes the slate: nothing is
+                # remembered, so the next visit starts from zero again.
                 if new_dir != direction:
+                    if direction and not new_dir:
+                        status = "cancelled (left the zone)"
+                    elif direction:
+                        status = "cancelled (changed zone)"
                     direction = new_dir
                     dir_start = now
-                    if new_dir != spoken_direction:
-                        confirmed_for = ""
-                        confirm_done = False
-
-                # returning to the centre band releases the confirm lock, so the
-                # next direction can be spoken again
-                if confirm_done and not direction:
-                    confirm_done = False
-                    confirmed_for = ""
                     spoken_direction = ""
-                    status = "released, centre"
 
                 held = (now - dir_start) if direction else 0.0
 
-                # speak the direction once it is held long enough
+                # speak the direction once it has been held long enough
                 if (direction and not speaker_busy(now)
                         and held >= args.hold
                         and direction != spoken_direction):
                     speak(direction)
                     spoken_direction = direction
-                    confirmed_for = ""
-                    confirm_done = False
                     status = f"say {direction}"
 
-                # then confirm if the eyes stay put and no blink happened
+                # keep holding, same zone, no blink -> confirm
                 elif (direction and direction == spoken_direction
-                      and not speaker_busy(now) and not confirm_done
+                      and not speaker_busy(now)
                       and held >= args.hold + args.confirm_after):
                     speak("confirm")
-                    confirmed_for = direction
-                    confirm_done = True
-                    status = "confirmed"
+                    status = f"{direction} confirmed"
+                    # a confirm ends the exchange: drop the direction so the
+                    # eyes have to leave and come back before it counts again
+                    direction = ""
+                    dir_start = 0.0
+                    spoken_direction = ""
 
-                if not status:
+                elif status == "" or status.startswith("say ") or status.startswith("cancelled"):
                     if direction:
                         status = f"{direction} {held:.1f}s"
                     else:
