@@ -16,7 +16,8 @@ GESTURES
 
 FETCH MODE
     Off -> on   two short blinks, speaker says "fetch"
-    On  -> off  two short blinks, speaker says "stop" then "back"
+    On  -> off  two short blinks, speaker says "stop", waits STOP_GAP, then
+                says "back"
 
 DIRECTIONS
     Only while the system is on and the speaker is quiet.
@@ -24,7 +25,13 @@ DIRECTIONS
         x greater than dx0 + LEFT_PX   -> left
         x less    than dx0 - RIGHT_PX  -> right
         y less    than dy0 - UP_PX     -> up
-        y greater than dy0 + DOWN_PX   -> down
+        x inside the centre band and the eyes half shut -> down
+
+    "Half shut" means the eyelid gap has fallen below HALF_EYE_RATIO of the
+    gap measured during calibration, so it follows your own eye shape rather
+    than a fixed pixel count. Half shutting only becomes "down" when the
+    horizontal error is already inside the centre band; otherwise the normal
+    left/right test still wins.
     Holding a direction for HOLD_SECONDS speaks it. Keeping the eyes in that
     same zone for another CONFIRM_SECONDS without a blink makes the speaker
     say "confirm".
@@ -63,6 +70,7 @@ import mediapipe as mp
 HOLD_SECONDS = 1.0        # hold a direction this long to hear it
 CONFIRM_SECONDS = 1.0     # keep holding it this much longer to hear "confirm"
 BLINK_GAP = 2.0           # two short blinks must be this close together
+STOP_GAP = 1.0            # pause between "stop" and "back"
 TRIPLE_GAP = 3.0          # long blinks older than this drop the count
 CALIB_WAIT_SECONDS = 2.0
 CALIB_SECONDS = 3.0
@@ -78,6 +86,9 @@ CENTER_PX = 10.0          # inside this band counts as no direction
 SHORT_MIN = 0.05
 SHORT_MAX = 0.30
 LONG_MIN = 0.50
+
+# ---- half shut eyes mean "down"
+HALF_EYE_RATIO = 0.5   # eyelid gap below this fraction of the calibrated gap
 
 # ---- eye aspect ratio, used to decide open or shut
 EAR_OPEN = 0.150
@@ -325,8 +336,10 @@ class RestCalibration:
         self.prompt_at = None
         self.record_start = None
         self.samples = []
+        self.height_samples = []
         self.dx0 = None
         self.dy0 = None
+        self.eye_h0 = None
 
     def needs_prompt(self):
         return self.prompt_at is None
@@ -335,7 +348,7 @@ class RestCalibration:
         speak("Please look straight ahead", busy_for=2.0)
         self.prompt_at = now
 
-    def feed(self, m, now):
+    def feed(self, m, eyes, now):
         waited = now - self.prompt_at
         if waited < CALIB_WAIT_SECONDS:
             return f"LOOK CENTRE - starting in {max(0.0, CALIB_WAIT_SECONDS - waited):.1f}s", -1.0
@@ -346,17 +359,29 @@ class RestCalibration:
 
         if m is not None:
             self.samples.append((m["dx"], m["dy"]))
+        if eyes is not None:
+            self.height_samples.append((eyes["hgt_l"] + eyes["hgt_r"]) / 2.0)
 
         if progress >= 1.0 and self.samples:
             xs = sorted(p[0] for p in self.samples)
             ys = sorted(p[1] for p in self.samples)
             self.dx0 = xs[len(xs) // 2]
             self.dy0 = ys[len(ys) // 2]
+            if self.height_samples:
+                hs = sorted(self.height_samples)
+                self.eye_h0 = hs[len(hs) // 2]
 
         return "RECORDING CENTRE", min(1.0, progress)
 
     def done(self):
         return self.dx0 is not None and self.dy0 is not None
+
+    def half_shut(self, eyes):
+        """True when the eyelid gap has fallen below HALF_EYE_RATIO of rest."""
+        if eyes is None or not self.eye_h0:
+            return False
+        h = (eyes["hgt_l"] + eyes["hgt_r"]) / 2.0
+        return h < self.eye_h0 * HALF_EYE_RATIO
 
 
 def save_frame(frame):
@@ -369,8 +394,13 @@ def save_frame(frame):
         return None
 
 
-def direction_of(x_err, y_err, flip_y):
-    """Pick the dominant axis. Returns '', 'left', 'right', 'up' or 'down'."""
+def direction_of(x_err, y_err, flip_y, half_shut=False):
+    """
+    Pick the dominant axis. Returns '', 'left', 'right', 'up' or 'down'.
+
+    Half shutting the eyes only counts as "down" while the horizontal error is
+    already inside the centre band, so a sideways glance always wins.
+    """
     if flip_y:
         y_err = -y_err
 
@@ -379,6 +409,9 @@ def direction_of(x_err, y_err, flip_y):
         horiz = "left"
     elif x_err < -RIGHT_PX:
         horiz = "right"
+
+    if half_shut and not horiz and abs(x_err) <= CENTER_PX:
+        return "down"
 
     vert = ""
     if y_err < -UP_PX:
@@ -462,7 +495,7 @@ def main():
     # ---- state
     sys_on = True
     fetch_mode = False
-    fetch_ready_until = 0.0     # after "fetch" only the eyes matter
+    back_due_at = 0.0           # "stop" has been said, "back" is pending
     calm_announced = False
 
     # blink bookkeeping
@@ -513,7 +546,7 @@ def main():
             if not cal.done():
                 if cal.needs_prompt():
                     cal.do_prompt(now)
-                label, progress = cal.feed(m, now)
+                label, progress = cal.feed(m, eyes, now)
                 if show_preview and not args.plain:
                     draw_calibration(frame, label, max(0.0, progress), m)
                     if eyes is not None:
@@ -563,19 +596,24 @@ def main():
                         direction, dir_start = "", 0.0
                         spoken_direction = ""
 
+                # "stop" was spoken earlier; "back" follows after STOP_GAP
+                if back_due_at and now >= back_due_at and sys_on:
+                    speak("back")
+                    back_due_at = 0.0
+                    status = "back"
+
                 # -------------------------------- short blink pairs: fetch
                 if short_blink and sys_on and not speaker_busy(now):
                     if short_pair_pending:
                         short_pair_pending = False
                         if fetch_mode:
                             speak("stop")
-                            speak("back")
+                            back_due_at = now + STOP_GAP
                             fetch_mode = False
-                            status = "stop, back"
+                            status = "stop"
                         else:
                             speak("fetch")
                             fetch_mode = True
-                            fetch_ready_until = now + 3.0
                             status = "fetch"
                         direction, dir_start = "", 0.0
                         spoken_direction = ""
@@ -588,7 +626,8 @@ def main():
                 y_err = m["dy"] - cal.dy0
 
                 if sys_on and not eyes_closed:
-                    new_dir = direction_of(x_err, y_err, args.flip_y)
+                    new_dir = direction_of(x_err, y_err, args.flip_y,
+                                           cal.half_shut(eyes))
                 else:
                     new_dir = ""
 
