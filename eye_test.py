@@ -1,6 +1,5 @@
 """
-Eye tracking with a mode switch between horizontal and vertical,
-plus closed-eye detection.
+Eye tracking for an assistive arm: gaze directions plus blink control.
 
 Points:
     a = my left pupil        b = my right pupil
@@ -9,21 +8,30 @@ Points:
 Calibration records the resting offset of d relative to c:
     dx0 = d.x - c.x          dy0 = d.y - c.y
 
-HOR mode (default)
-    d.x - c.x > dx0 + 10  held 1s -> speak "left",  cooldown 1s, stay in HOR
-    d.x - c.x < dx0 - 10  held 1s -> speak "right", cooldown 1s, stay in HOR
-    |d.x - c.x - dx0| <= 10 held 1s -> switch to VER
+GAZE (only while the system is ON and not busy)
+    HOR mode
+      d.x - c.x > dx0 + 10  held 1s -> speak "left",  cooldown 1s
+      d.x - c.x < dx0 - 10  held 1s -> speak "right", cooldown 1s
+      |d.x - c.x - dx0| <= 10 held 1s -> switch to VER
+    VER mode
+      d.y - c.y - dy0 < -10 held 1s -> speak "up",    cooldown 1s
+      d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 1s
+      |d.y - c.y - dy0| <= 10 held 1s -> switch to HOR
 
-VER mode
-    d.y - c.y - dy0 < -10 held 1s -> speak "up",    cooldown 1s
-    d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 1s
-    |d.y - c.y - dy0| <= 10 held 1s -> switch to HOR
+BLINKS
+    A blink is an eye closure that lasts at least BLINK_MIN seconds.
+    Three blinks inside TRIPLE_WINDOW seconds toggle the system on or off.
+    The triple-blink counter is only live while the system is ON, nothing is
+    cooling down, and we are not in a fetch/back cycle.
 
-Closed-eye detection uses the eye aspect ratio (EAR = lid gap / eye width).
-    EAR above the open threshold -> eyes open
-    EAR below the closed threshold -> eyes closed
-While the eyes are closed the gaze state is frozen: no timers advance, no
-speech fires, and the mode does not switch. This is display-only for now.
+    Inside the 1s cooldown that follows a spoken direction:
+      - close the eyes >= BLINK_MIN, then open  -> speak "confirm",
+        which starts a fresh 1s window
+      - inside that confirm window, start closing the eyes and keep them
+        shut past FETCH_MIN seconds -> speak "fetch" and stay quiet until
+        the eyes open, then speak "back" and cool down for as long as the
+        eyes were shut
+    A fetch can only follow a confirm; it is never triggered directly.
 
 This build prints nothing to the console: everything is drawn on the preview.
 Use eye_test_verbose.py when the numbers are needed for tuning.
@@ -62,7 +70,11 @@ CENTER_PX = 10.0      # back within this band switches mode
 
 EAR_OPEN = 0.150      # above this the eyes count as open
 EAR_CLOSED = 0.090    # below this the eyes count as closed
-EAR_HYSTERESIS_GAP = EAR_OPEN - EAR_CLOSED
+
+BLINK_MIN = 0.5       # a closure this long counts as a blink
+TRIPLE_WINDOW = 5.0   # three blinks inside this window toggle the system
+FETCH_MIN = 1.2       # a closure this long, inside the confirm window, is a fetch
+CONFIRM_WINDOW = 1.0  # how long after "confirm" a fetch may start
 
 VIEW_W, VIEW_H = 1280, 720
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -137,7 +149,7 @@ def eye_aspect_ratio(landmarks, upper, lower, corner_a, corner_b, w, h):
 
 
 def measure_eyes(landmarks, w, h):
-    """EAR for each eye plus the mean, which drives the closed detection."""
+    """EAR for each eye plus the mean, which drives blink detection."""
     ear_l, hgt_l, wid_l = eye_aspect_ratio(landmarks, *EYE_LIDS["left"], w, h)
     ear_r, hgt_r, wid_r = eye_aspect_ratio(landmarks, *EYE_LIDS["right"], w, h)
     return {"ear_l": ear_l, "ear_r": ear_r, "ear": (ear_l + ear_r) / 2.0,
@@ -146,17 +158,14 @@ def measure_eyes(landmarks, w, h):
 
 
 def eyes_closed_state(ear, was_closed):
-    """
-    Hysteresis so a single noisy frame cannot flip the state.
-    Returns True when the eyes should be treated as closed.
-    """
+    """Hysteresis so a single noisy frame cannot flip the state."""
     if was_closed:
-        return ear < EAR_OPEN                 # stay closed until clearly open
-    return ear < EAR_CLOSED                   # only close below the lower bound
+        return ear < EAR_OPEN
+    return ear < EAR_CLOSED
 
 
-def draw_debug(frame, m, centre, mode, state_msg, closed):
-    """a, b, c, d, the resting centre, the decision bands and the eye state."""
+# ---------------------------------------------------------------- drawing
+def draw_debug(frame, m, centre, mode, state_msg, closed, sys_on, busy):
     h, w = frame.shape[:2]
 
     for key, colour, label in (("a", (0, 255, 0), "a"),
@@ -182,22 +191,31 @@ def draw_debug(frame, m, centre, mode, state_msg, closed):
         for yy in (int(cy - UP_PX), int(cy + DOWN_PX)):
             cv2.line(frame, (0, yy), (w, yy), (200, 160, 80), 1)
 
-    mode_colour = (0, 255, 0) if mode == "HOR" else (0, 200, 255)
-    if closed:
+    if not sys_on:
+        mode_colour = (80, 80, 80)
+        mode_text = "SYS OFF"
+    elif closed or busy:
         mode_colour = (90, 90, 90)
-    cv2.putText(frame, f"mode {mode}", (12, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, mode_colour, 2)
+        mode_text = f"mode {mode}"
+    else:
+        mode_colour = (0, 255, 0) if mode == "HOR" else (0, 200, 255)
+        mode_text = f"mode {mode}"
+
+    cv2.putText(frame, mode_text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, mode_colour, 2)
     if state_msg:
         cv2.putText(frame, state_msg, (12, 58),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-    if closed:
+    if not sys_on:
+        cv2.putText(frame, "SYSTEM OFF - blink 3x to start", (12, 88),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 120, 255), 2)
+    elif closed:
         cv2.putText(frame, "EYES CLOSED", (12, 88),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
 
 def draw_eye_points(frame, landmarks, w, h):
-    """Mark the lid and corner points used for the eye aspect ratio."""
     for upper, lower, ca, cb in EYE_LIDS.values():
         for i in upper:
             x, y = int(landmarks[i].x * w), int(landmarks[i].y * h)
@@ -211,7 +229,6 @@ def draw_eye_points(frame, landmarks, w, h):
 
 
 def draw_ear(frame, eyes, closed):
-    """Top-right EAR box with a bar that shows where the thresholds sit."""
     h, w = frame.shape[:2]
     x0 = w - 230
     y0 = 12
@@ -226,7 +243,6 @@ def draw_ear(frame, eyes, closed):
     cv2.putText(frame, f"mean  {eyes['ear']:.3f}  {'CLOSED' if closed else 'open'}",
                 (x0, y0 + 56), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-    # bar: EAR 0.0 -> 0.40 across 140 px, with the two thresholds marked
     bar_x, bar_y, bar_w, bar_h = x0, y0 + 62, 140, 8
     cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (70, 70, 70), -1)
     frac = max(0.0, min(1.0, eyes["ear"] / 0.40))
@@ -237,8 +253,22 @@ def draw_ear(frame, eyes, closed):
         cv2.line(frame, (tx, bar_y - 3), (tx, bar_y + bar_h + 3), tick, 1)
 
 
+def draw_blink_state(frame, blinks, busy):
+    """Third line in the EAR box area: triple-blink progress and busy flag."""
+    h, w = frame.shape[:2]
+    x0 = w - 230
+    y0 = 96
+
+    cv2.rectangle(frame, (x0 - 8, y0 - 4), (w - 8, y0 + 24), (35, 35, 35), -1)
+    dots = "".join("*" if i < blinks else "." for i in range(3))
+    label = f"blink {dots}"
+    if busy:
+        label += f"  {busy}"
+    cv2.putText(frame, label, (x0, y0 + 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 210, 120), 1)
+
+
 def draw_numbers(frame, m, centre, x_err, y_err, trig_dir, held, sw_held, action):
-    """Live readout block, bottom-left, replacing the console status line."""
     h, w = frame.shape[:2]
     lines = []
 
@@ -261,7 +291,6 @@ def draw_numbers(frame, m, centre, x_err, y_err, trig_dir, held, sw_held, action
 
 
 def draw_calibration(frame, label, progress, m):
-    """Calibration prompt and progress, drawn instead of printed."""
     h, w = frame.shape[:2]
 
     cv2.rectangle(frame, (0, 0), (w, 90), (40, 40, 40), -1)
@@ -332,7 +361,7 @@ def save_frame(frame):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Eye tracking, HOR/VER mode switch")
+    p = argparse.ArgumentParser(description="Eye tracking with gaze and blink control")
     p.add_argument("--dx0", type=float, default=None, help="resting d.x - c.x")
     p.add_argument("--dy0", type=float, default=None, help="resting d.y - c.y")
     p.add_argument("--left-px", type=float, default=LEFT_PX)
@@ -344,6 +373,10 @@ def parse_args():
                    help="EAR above this counts as open")
     p.add_argument("--ear-closed", type=float, default=EAR_CLOSED,
                    help="EAR below this counts as closed")
+    p.add_argument("--blink-min", type=float, default=BLINK_MIN,
+                   help="closure length that counts as a blink")
+    p.add_argument("--fetch-min", type=float, default=FETCH_MIN,
+                   help="closure length that counts as a fetch")
     p.add_argument("--flip-y", action="store_true", help="invert the up/down test")
     p.add_argument("--calib", action="store_true", help="calibrate even if dx0/dy0 given")
     p.add_argument("--no-preview", action="store_true", help="run headless")
@@ -353,15 +386,15 @@ def parse_args():
 
 
 def main():
-    global EAR_OPEN, EAR_CLOSED
+    global EAR_OPEN, EAR_CLOSED, BLINK_MIN, FETCH_MIN
     args = parse_args()
 
-    if args.ear_open is not None:
-        EAR_OPEN = args.ear_open
-    if args.ear_closed is not None:
-        EAR_CLOSED = args.ear_closed
+    EAR_OPEN = args.ear_open
+    EAR_CLOSED = args.ear_closed
     if EAR_CLOSED >= EAR_OPEN:
         EAR_CLOSED = EAR_OPEN - 0.02
+    BLINK_MIN = args.blink_min
+    FETCH_MIN = args.fetch_min
 
     fixed = None
     if not args.calib and args.dx0 is not None and args.dy0 is not None:
@@ -384,18 +417,29 @@ def main():
     if fixed:
         cal.dx0, cal.dy0 = fixed
 
+    # ---- system state
+    sys_on = True                 # runs as soon as the script starts
     mode = "HOR"
     calib_announced = False
-    eyes_closed = False
 
     trig_dir = None
     trig_start = 0.0
     switch_start = None
     cooldown_until = 0.0
 
+    # ---- blink bookkeeping
+    eyes_closed = False
+    close_start = 0.0
+    blink_times = []              # timestamps of completed blinks
+    confirm_until = 0.0           # window in which a fetch may begin
+    fetch_active = False
+    fetch_close_start = 0.0
+    back_cooldown_until = 0.0     # set after "back"
+
     m = None
     eyes = None
     action = "-"
+    busy = ""
     x_err = y_err = 0.0
     held = sw_held = 0.0
 
@@ -413,14 +457,16 @@ def main():
             m = None
             eyes = None
             lm = None
+            face_seen = False
             if result.multi_face_landmarks:
+                face_seen = True
                 lm = result.multi_face_landmarks[0].landmark
                 m = measure(lm, w, h)
                 eyes = measure_eyes(lm, w, h)
+                was_closed = eyes_closed
                 eyes_closed = eyes_closed_state(eyes["ear"], eyes_closed)
 
             now = time.time()
-            cooling = now < cooldown_until
 
             # -------------------------------------------- calibration
             if not cal.done():
@@ -431,96 +477,163 @@ def main():
                     draw_calibration(frame, label, max(0.0, progress), m)
                     if eyes is not None:
                         draw_ear(frame, eyes, eyes_closed)
-
-            elif m is None:
-                trig_dir, trig_start, switch_start = None, 0.0, None
-                action = "no face"
-
-            elif eyes_closed:
-                # gaze is frozen while the eyes are shut: no timers, no speech
-                trig_dir, trig_start, switch_start = None, 0.0, None
-                action = f"eyes closed (EAR {eyes['ear']:.3f})"
-
-            else:
-                if not calib_announced:
-                    speak("ready")
+                if cal.done() and not calib_announced:
+                    speak("system on")
                     calib_announced = True
 
-                x_err = m["dx"] - cal.dx0
-                y_err = m["dy"] - cal.dy0
-                if args.flip_y:
-                    y_err = -y_err
+            elif not face_seen:
+                trig_dir, trig_start, switch_start = None, 0.0, None
+                action = "no face"
+                busy = ""
 
-                spoken = None
-                action = "-"
+            else:
+                # ---------------------------------------- blink bookkeeping
+                # a blink completes when the eyes reopen after >= BLINK_MIN closed
+                completed_blink = False
+                closed_for = 0.0
+                if eyes_closed:
+                    if close_start == 0.0:
+                        close_start = now
+                    closed_for = now - close_start
+                else:
+                    if close_start != 0.0:
+                        closed_for = now - close_start
+                        if closed_for >= BLINK_MIN:
+                            completed_blink = True
+                        close_start = 0.0
 
-                if cooling:
-                    action = f"cooldown {cooldown_until - now:.1f}s"
+                # fetch: only possible inside the confirm window
+                if (not fetch_active and eyes_closed
+                        and confirm_until > 0.0 and close_start > 0.0
+                        and close_start <= confirm_until
+                        and closed_for >= FETCH_MIN):
+                    fetch_active = True
+                    fetch_close_start = close_start
+                    cooldown_until = 0.0
+                    confirm_until = 0.0
+                    speak("fetch")
+
+                if fetch_active:
+                    busy = "fetch"
+                    action = "fetch: waiting for eyes to open"
+                    if not eyes_closed:
+                        long_enough = now - fetch_close_start
+                        speak("back")
+                        back_cooldown_until = now + long_enough
+                        cooldown_until = back_cooldown_until
+                        fetch_active = False
+                        busy = ""
+
+                elif now < back_cooldown_until:
+                    busy = f"back {back_cooldown_until - now:.1f}s"
+                    action = "back cooldown"
                     trig_dir, trig_start, switch_start = None, 0.0, None
 
-                elif mode == "HOR":
-                    if x_err > args.left_px:
-                        want = "left"
-                    elif x_err < -args.right_px:
-                        want = "right"
-                    else:
-                        want = None
+                elif completed_blink and now < cooldown_until:
+                    # blink inside the direction cooldown -> confirm
+                    speak("confirm")
+                    cooldown_until = now + COOLDOWN_SECONDS
+                    confirm_until = now + CONFIRM_WINDOW
+                    busy = f"confirm {CONFIRM_WINDOW:.0f}s"
+                    action = "confirm: fetch window open"
+                    blink_times.clear()
 
-                    if want:
-                        switch_start = None
-                        if trig_dir != want:
-                            trig_dir, trig_start = want, now
-                        elif now - trig_start >= HOLD_SECONDS:
-                            spoken = want
-                            action = f"say {want}"
-                            cooldown_until = now + COOLDOWN_SECONDS
-                            trig_dir, trig_start = None, 0.0
-                    else:
-                        trig_dir, trig_start = None, 0.0
-                        if abs(x_err) <= args.center_px:
-                            if switch_start is None:
-                                switch_start = now
-                            elif now - switch_start >= SWITCH_SECONDS:
-                                mode = "VER"
+                elif now < cooldown_until:
+                    busy = f"cooldown {cooldown_until - now:.1f}s"
+                    action = "direction cooldown"
+                    trig_dir, trig_start, switch_start = None, 0.0, None
+
+                else:
+                    busy = ""
+
+                    # -------------------------------- triple blink toggles the system
+                    if completed_blink:
+                        blink_times.append(now)
+                    blink_times = [t for t in blink_times if now - t <= TRIPLE_WINDOW]
+                    if len(blink_times) >= 3:
+                        blink_times.clear()
+                        sys_on = not sys_on
+                        speak("on" if sys_on else "off")
+                        cooldown_until = now + COOLDOWN_SECONDS
+                        trig_dir, trig_start, switch_start = None, 0.0, None
+
+                    # -------------------------------- gaze, only while ON
+                    if sys_on:
+                        x_err = m["dx"] - cal.dx0
+                        y_err = m["dy"] - cal.dy0
+                        if args.flip_y:
+                            y_err = -y_err
+
+                        spoken = None
+                        if mode == "HOR":
+                            if x_err > args.left_px:
+                                want = "left"
+                            elif x_err < -args.right_px:
+                                want = "right"
+                            else:
+                                want = None
+
+                            if want:
                                 switch_start = None
-                                action = "-> VER"
-                        else:
-                            switch_start = None
+                                if trig_dir != want:
+                                    trig_dir, trig_start = want, now
+                                elif now - trig_start >= HOLD_SECONDS:
+                                    spoken = want
+                                    action = f"say {want}"
+                                    cooldown_until = now + COOLDOWN_SECONDS
+                                    confirm_until = 0.0
+                                    trig_dir, trig_start = None, 0.0
+                            else:
+                                trig_dir, trig_start = None, 0.0
+                                if abs(x_err) <= args.center_px:
+                                    if switch_start is None:
+                                        switch_start = now
+                                    elif now - switch_start >= SWITCH_SECONDS:
+                                        mode = "VER"
+                                        switch_start = None
+                                        action = "-> VER"
+                                else:
+                                    switch_start = None
 
-                else:  # VER
-                    if y_err < -args.up_px:
-                        want = "up"
-                    elif y_err > args.down_px:
-                        want = "down"
-                    else:
-                        want = None
+                        else:  # VER
+                            if y_err < -args.up_px:
+                                want = "up"
+                            elif y_err > args.down_px:
+                                want = "down"
+                            else:
+                                want = None
 
-                    if want:
-                        switch_start = None
-                        if trig_dir != want:
-                            trig_dir, trig_start = want, now
-                        elif now - trig_start >= HOLD_SECONDS:
-                            spoken = want
-                            action = f"say {want}"
-                            cooldown_until = now + COOLDOWN_SECONDS
-                            trig_dir, trig_start = None, 0.0
-                    else:
-                        trig_dir, trig_start = None, 0.0
-                        if abs(y_err) <= args.center_px:
-                            if switch_start is None:
-                                switch_start = now
-                            elif now - switch_start >= SWITCH_SECONDS:
-                                mode = "HOR"
+                            if want:
                                 switch_start = None
-                                action = "-> HOR"
-                        else:
-                            switch_start = None
+                                if trig_dir != want:
+                                    trig_dir, trig_start = want, now
+                                elif now - trig_start >= HOLD_SECONDS:
+                                    spoken = want
+                                    action = f"say {want}"
+                                    cooldown_until = now + COOLDOWN_SECONDS
+                                    confirm_until = 0.0
+                                    trig_dir, trig_start = None, 0.0
+                            else:
+                                trig_dir, trig_start = None, 0.0
+                                if abs(y_err) <= args.center_px:
+                                    if switch_start is None:
+                                        switch_start = now
+                                    elif now - switch_start >= SWITCH_SECONDS:
+                                        mode = "HOR"
+                                        switch_start = None
+                                        action = "-> HOR"
+                                else:
+                                    switch_start = None
 
-                if spoken:
-                    speak(spoken)
+                        if spoken:
+                            speak(spoken)
 
-                held = (now - trig_start) if trig_dir else 0.0
-                sw_held = (now - switch_start) if switch_start else 0.0
+                        held = (now - trig_start) if trig_dir else 0.0
+                        sw_held = (now - switch_start) if switch_start else 0.0
+                    else:
+                        trig_dir, trig_start, switch_start = None, 0.0, None
+                        held = sw_held = 0.0
+                        action = "system off"
 
             # -------------------------------------------- window
             if show_preview:
@@ -529,9 +642,10 @@ def main():
                     if cal.done():
                         if m is not None:
                             draw_debug(display, m, (cal.dx0, cal.dy0), mode,
-                                       action, eyes_closed)
+                                       action, eyes_closed, sys_on, bool(busy))
                             draw_eye_points(display, lm, w, h)
                             draw_ear(display, eyes, eyes_closed)
+                            draw_blink_state(display, len(blink_times), busy)
                             draw_numbers(display, m, (cal.dx0, cal.dy0),
                                          x_err, y_err, trig_dir, held, sw_held, action)
                         else:
