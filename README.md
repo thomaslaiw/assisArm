@@ -66,15 +66,23 @@ process — no extra package, no network.
    directions at once. Returning the eyes to the centre band for one second
    hands control to the other axis.
 
+## Files
+
+| file | purpose |
+|---|---|
+| `eye_test.py` | silent build — **no console output at all**; everything is drawn on the preview |
+| `eye_test_verbose.py` | same logic with full console prints; use this when tuning thresholds |
+
 ## Usage
 
-Calibrate (look straight ahead when prompted):
+Calibrate (look straight ahead when prompted) — with the silent build everything
+appears in the preview window:
 
 ```
-python eye_test.py --debug
+python eye_test.py
 ```
 
-It prints the resting offset:
+The verbose build prints the resting offset:
 
 ```
 resting offset d-c: dx0=-232.5  dy0=-38.2 (90 frames)
@@ -83,7 +91,7 @@ resting offset d-c: dx0=-232.5  dy0=-38.2 (90 frames)
 Reuse those numbers so calibration is skipped:
 
 ```
-python eye_test.py --dx0 -232.5 --dy0 -38.2 --debug
+python eye_test.py --dx0 -232.5 --dy0 -38.2
 ```
 
 | flag | meaning |
@@ -95,8 +103,8 @@ python eye_test.py --dx0 -232.5 --dy0 -38.2 --debug
 | `--down-px` | travel needed to count as down (default 5) |
 | `--center-px` | band that hands control to the other axis (default 10) |
 | `--flip-y` | invert up/down if the camera orientation needs it |
-| `--debug` | draw a, b, c, d, the resting point and the bands |
-| `--no-preview` | run headless |
+| `--plain` | raw camera image only, no overlay at all |
+| `--no-preview` | run headless (silent build: no output whatsoever) |
 | `--calib` | force calibration even when offsets are given |
 
 Keys while running:
