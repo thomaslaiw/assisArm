@@ -113,9 +113,8 @@ class WifiArm(ArmActions):
         print("[arm] down: not wired yet")
 
     def on_back(self):
-        # the back gesture retracts the claw; it is not a reset
-        print("[arm] back -> retract claw")
-        self._set_channel("hand", CLAW_OPEN)
+        # nothing wired yet: the back gesture still needs a physical decision
+        print("[arm] back (no action yet)")
 
     def on_shutdown(self):
         # the program is closing: every joint goes home
