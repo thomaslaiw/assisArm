@@ -35,9 +35,9 @@ const char *AP_PASS = "88888888";          // at least 8 chars, or "" for open
 
 // If you would rather join your home WiFi than open an access point,
 // fill these in and set USE_STA to true.
-const bool USE_STA = false;
-const char *STA_SSID = "your-wifi-name";
-const char *STA_PASS = "your-wifi-password";
+const bool USE_STA = true;
+const char *STA_SSID = "Galaxy A55 5G 78A5";
+const char *STA_PASS = "zaq12wsx";
 
 // ---------------------------------------------------------------- servos
 struct Channel {
@@ -54,7 +54,7 @@ Channel channels[] = {
   { "stand",   14,            90,    10, 170,  90 },
   { "arm1",     4,            90,    10, 170,  90 },
   { "arm2",     0,            90,    10, 170,  90 },
-  { "arm3",    16,            90,    10, 170,  90 },
+  // { "arm3",    16,            90,    10, 170,  90 },   // GPIO16 disabled for diagnosis
   { "hand",     5,            90,    10, 170,  90 },
 };
 const int CH_COUNT = sizeof(channels) / sizeof(channels[0]);
@@ -114,7 +114,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 <div id="list"></div>
 <button id="home" onclick="fetch('/home')">home all</button>
 <script>
-const CH = ["stand","arm1","arm2","arm3","hand"];
+const CH = ["stand","arm1","arm2","hand"];
 const list = document.getElementById('list');
 CH.forEach(name => {
   const d = document.createElement('div');
