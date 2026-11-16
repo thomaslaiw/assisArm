@@ -29,7 +29,7 @@ import urllib.request
 
 from eye_test import ArmActions, main
 
-DEFAULT_HOST = "192.168.133.157"
+DEFAULT_HOST = "192.168.244.157"
 DEFAULT_STEP = 10          # degrees per confirmed direction
 CLAW_OPEN = 40             # servo angle that opens the gripper
 CLAW_CLOSED = 120          # servo angle that closes the gripper
