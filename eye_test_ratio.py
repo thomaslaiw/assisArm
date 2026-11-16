@@ -68,6 +68,7 @@ import mediapipe as mp
 HOLD_SECONDS = 1.0
 CONFIRM_SECONDS = 1.0
 BLINK_GAP = 2.0
+FETCH_GRACE = 1.0         # after fetch starts, ignore eye closures this long
 STOP_GAP = 1.0
 TRIPLE_GAP = 3.0
 CALIB_WAIT_SECONDS = 2.0
@@ -505,6 +506,7 @@ def main(actions=None):
     # ---- state
     sys_on = True
     fetch_mode = False
+    fetch_started_at = 0.0
     back_due_at = 0.0
     calm_announced = False
 
@@ -591,7 +593,8 @@ def main(actions=None):
                 # -------------------------------- fetch: a closure stops it
                 # While fetching, nothing else is listening: no power toggle and
                 # no blink pairs. The only signal is the eyes closing.
-                if fetch_mode and eyes_closed and sys_on:
+                if (fetch_mode and eyes_closed and sys_on
+                        and (now - fetch_started_at) >= FETCH_GRACE):
                     speak("stop")
                     actions.on_stop()
                     back_due_at = now + STOP_GAP
@@ -633,6 +636,7 @@ def main(actions=None):
                         speak("fetch")
                         actions.on_fetch()
                         fetch_mode = True
+                        fetch_started_at = now
                         status = "fetch"
                         direction, dir_start = "", 0.0
                         spoken_direction = ""
