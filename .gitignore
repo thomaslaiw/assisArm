@@ -4,8 +4,17 @@
 *.jpeg
 saved_frames/
 
+# firmware dumps are large binaries and machine-specific
+firmware_backup/*.bin
+
+# course material stays local
+*.pdf
+
 # python
 __pycache__/
 *.pyc
 .venv/
 venv/
+
+# arduino build output
+firmware/**/build/
