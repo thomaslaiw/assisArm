@@ -18,13 +18,20 @@ Everything runs **locally**. No frame, image or landmark ever leaves the machine
 
 ## Requirements
 
-- Python 3.11
+- Python 3.11 (3.13 is untested: mediapipe 0.10.14 has no wheels for it)
 - Packages:
   ```
-  pip install "mediapipe==0.10.14" "opencv-python==4.11.0.86" "numpy==1.26.4"
+  pip install -r requirements.txt
   ```
 
-MediaPipe 1.x removed the `mp.solutions` API, so pinning 0.10.14 matters.
+The pins matter:
+
+| package | version | why |
+|---|---|---|
+| `mediapipe` | 0.10.14 | 1.x removed the `mp.solutions` API this script depends on |
+| `opencv-python` | 4.11.0.86 | 5.x requires numpy>=2, which conflicts with mediapipe |
+| `numpy` | 1.26.4 | must match what mediapipe 0.10.14 was built against |
+
 Speech uses the Windows `System.Speech` engine through a short-lived PowerShell
 process — no extra package, no network.
 

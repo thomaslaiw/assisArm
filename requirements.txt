@@ -1,0 +1,15 @@
+# Python 3.11 (3.13 not tested; mediapipe 0.10.14 does not ship wheels for it)
+#
+# Pinned deliberately. Do not upgrade without re-testing:
+#   - mediapipe 1.x removed the mp.solutions API, which this script needs
+#   - opencv 5.x requires numpy>=2, which conflicts with mediapipe 0.10.14
+#
+# Install with:
+#     python -m pip install -r requirements.txt
+
+mediapipe==0.10.14
+opencv-python==4.11.0.86
+numpy==1.26.4
+
+# Speech uses the Windows built-in System.Speech engine through PowerShell.
+# No package needed, and nothing is sent over the network.
