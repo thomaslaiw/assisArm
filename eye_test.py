@@ -81,6 +81,7 @@ HOLD_SECONDS = 1.0        # hold a direction this long to hear it
 CONFIRM_SECONDS = 1.0     # keep holding it this much longer to hear "confirm"
 BLINK_GAP = 2.0           # two short blinks must be this close together
 STOP_GAP = 1.0            # pause between "stop" and "back"
+FETCH_GRACE = 1.0         # after fetch starts, ignore eye closures this long
 TRIPLE_GAP = 3.0          # long blinks older than this drop the count
 CALIB_WAIT_SECONDS = 2.0
 CALIB_SECONDS = 3.0
@@ -576,6 +577,7 @@ def main(actions=None):
     # ---- state
     sys_on = True
     fetch_mode = False
+    fetch_started_at = 0.0
     back_due_at = 0.0           # "stop" has been said, "back" is pending
     calm_announced = False
 
@@ -666,8 +668,25 @@ def main(actions=None):
                 if short_pair_pending and (now - last_short_at) > BLINK_GAP:
                     short_pair_pending = False
 
+                # -------------------------------- fetch: a closure stops it
+                # While fetching nothing else listens: no power toggle, no blink
+                # pairs. The only signal is the eyes closing, which stops the
+                # fetch on that frame once the opening blink has cleared.
+                if (fetch_mode and eyes_closed and sys_on
+                        and (now - fetch_started_at) >= FETCH_GRACE):
+                    speak("stop")
+                    actions.on_stop()
+                    back_due_at = now + STOP_GAP
+                    fetch_mode = False
+                    status = "stop (eyes closed)"
+                    direction, dir_start = "", 0.0
+                    spoken_direction = ""
+                    long_count = 0
+                    short_pair_pending = False
+                    close_start = 0.0
+
                 # -------------------------------- long blinks: system on/off
-                if long_blink:
+                if long_blink and not fetch_mode:
                     long_count += 1
                     last_long_at = now
                     if long_count >= 3:
@@ -690,20 +709,14 @@ def main(actions=None):
                     status = "back"
 
                 # -------------------------------- short blink pairs: fetch
-                if short_blink and sys_on and not speaker_busy(now):
+                if short_blink and sys_on and not fetch_mode and not speaker_busy(now):
                     if short_pair_pending:
                         short_pair_pending = False
-                        if fetch_mode:
-                            speak("stop")
-                            actions.on_stop()
-                            back_due_at = now + STOP_GAP
-                            fetch_mode = False
-                            status = "stop"
-                        else:
-                            speak("fetch")
-                            actions.on_fetch()
-                            fetch_mode = True
-                            status = "fetch"
+                        speak("fetch")
+                        actions.on_fetch()
+                        fetch_mode = True
+                        fetch_started_at = now
+                        status = "fetch"
                         direction, dir_start = "", 0.0
                         spoken_direction = ""
                     else:
