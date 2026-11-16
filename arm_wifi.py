@@ -113,7 +113,13 @@ class WifiArm(ArmActions):
         print("[arm] down: not wired yet")
 
     def on_back(self):
-        print("[arm] back -> home")
+        # the back gesture retracts the claw; it is not a reset
+        print("[arm] back -> retract claw")
+        self._set_channel("hand", CLAW_OPEN)
+
+    def on_shutdown(self):
+        # the program is closing: every joint goes home
+        print("[arm] shutdown -> home")
         self._get("/home")
 
     def on_centre(self):
@@ -121,11 +127,9 @@ class WifiArm(ArmActions):
 
     def on_system_on(self):
         print("[arm] system on")
-        self._get("/home")
 
     def on_system_off(self):
-        print("[arm] system off - parking")
-        self._get("/home")
+        print("[arm] system off")
 
 
 def parse_arm_args():

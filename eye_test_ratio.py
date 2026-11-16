@@ -126,7 +126,12 @@ class ArmActions:
         print("[arm] STOP")
 
     def on_back(self):
+        """The back gesture: retract the claw. Not a reset."""
         print("[arm] BACK")
+
+    def on_shutdown(self):
+        """The program is closing. Park everything at home."""
+        print("[arm] SHUTDOWN - parking")
 
     def on_system_on(self):
         print("[arm] SYSTEM ON")
@@ -707,12 +712,11 @@ def main(actions=None):
         pass
 
     finally:
-        # whichever way we leave - quit key, window close, Ctrl+C - send the
-        # arm home so it is never left holding an awkward pose
+        # the program is closing, however it was closed: park the arm at home
         try:
-            actions.on_back()
+            actions.on_shutdown()
         except Exception as e:
-            print(f"[arm] could not send home on exit: {e}")
+            print(f"[arm] could not park on exit: {e}")
         cap.release()
         if show_preview:
             cv2.destroyAllWindows()
