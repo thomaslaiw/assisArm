@@ -129,7 +129,10 @@ class WifiArm(ArmActions):
         print("[arm] system on")
 
     def on_system_off(self):
-        print("[arm] system off")
+        # switching the system off parks the arm, so it does not sit in a
+        # half-extended pose while nothing is watching the eyes
+        print("[arm] system off -> home")
+        self._get("/home")
 
 
 def parse_arm_args():
