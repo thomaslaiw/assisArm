@@ -23,8 +23,7 @@ up / down / back are left as no-ops until the arm's geometry is settled.
 """
 
 import argparse
-import json
-import os
+import time
 import urllib.error
 import urllib.request
 
@@ -36,6 +35,8 @@ CLAW_OPEN = 40             # servo angle that opens the gripper
 CLAW_CLOSED = 120          # servo angle that closes the gripper
 
 TIMEOUT = 0.8              # seconds; keep short so a dead network cannot stall gaze
+NO_REPLY_WARN = 4.0        # say "waiting" every time this many seconds pass unanswered
+WAITING_WORD = "waiting"
 
 
 class WifiArm(ArmActions):
@@ -46,13 +47,20 @@ class WifiArm(ArmActions):
         self.step = step
         self.reachable = None      # None = untested, True/False after first call
         self.last_error = ""
+        self.unanswered_since = None   # when contact was lost; None = healthy
+        self.last_warning = 0.0        # when we last said "waiting"
 
     # ------------------------------------------------------------ transport
     def _get(self, path):
         url = self.base + path
+        now = time.time()
         try:
             with urllib.request.urlopen(url, timeout=TIMEOUT) as r:
                 body = r.read().decode("utf-8", "replace")
+            # contact restored: drop the accumulation
+            if self.unanswered_since is not None:
+                print(f"[arm] contact restored after {now - self.unanswered_since:.1f}s")
+            self.unanswered_since = None
             self.reachable = True
             return body
         except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -60,6 +68,17 @@ class WifiArm(ArmActions):
                 self.last_error = str(e)
                 print(f"[arm] cannot reach {self.base} ({e})")
             self.reachable = False
+
+            # start the clock on first failure, then warn once every NO_REPLY_WARN
+            if self.unanswered_since is None:
+                self.unanswered_since = now
+                self.last_warning = now
+            elapsed = now - self.unanswered_since
+            if elapsed >= NO_REPLY_WARN and (now - self.last_warning) >= NO_REPLY_WARN:
+                from eye_test import speak
+                speak(WAITING_WORD)
+                self.last_warning = now
+                print(f"[arm] still unreachable after {elapsed:.1f}s")
             return None
 
     def _step_channel(self, channel, degrees):
