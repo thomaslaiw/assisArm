@@ -68,7 +68,7 @@ import mediapipe as mp
 HOLD_SECONDS = 1.0
 CONFIRM_SECONDS = 1.0
 BLINK_GAP = 2.0
-FETCH_GRACE = 1.0         # after fetch starts, ignore eye closures this long
+FETCH_GRACE = 0.5         # after fetch starts, ignore eye closures this long
 STOP_GAP = 1.0
 TRIPLE_GAP = 3.0
 CALIB_WAIT_SECONDS = 2.0
@@ -593,8 +593,15 @@ def main(actions=None):
                 # -------------------------------- fetch: a closure stops it
                 # While fetching, nothing else is listening: no power toggle and
                 # no blink pairs. The only signal is the eyes closing.
+                if fetch_mode:
+                    print(f"[dbg] fetch held {now - fetch_started_at:5.2f}s  "
+                          f"closed={eyes_closed}  close_start={close_start:.2f}  "
+                          f"grace_ok={(now - fetch_started_at) >= FETCH_GRACE}",
+                          flush=True)
+
                 if (fetch_mode and eyes_closed and sys_on
                         and (now - fetch_started_at) >= FETCH_GRACE):
+                    print("[dbg] STOP FIRING", flush=True)
                     speak("stop")
                     actions.on_stop()
                     back_due_at = now + STOP_GAP
@@ -633,6 +640,7 @@ def main(actions=None):
                 if short_blink and sys_on and not fetch_mode and not speaker_busy(now):
                     if short_pair_pending:
                         short_pair_pending = False
+                        print(f"[dbg] FETCH STARTED at {now:.2f}", flush=True)
                         speak("fetch")
                         actions.on_fetch()
                         fetch_mode = True
@@ -641,6 +649,8 @@ def main(actions=None):
                         direction, dir_start = "", 0.0
                         spoken_direction = ""
                     else:
+                        print(f"[dbg] short blink banked (pair pending) at {now:.2f}",
+                              flush=True)
                         short_pair_pending = True
                         last_short_at = now
 
