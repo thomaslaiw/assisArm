@@ -35,7 +35,7 @@ CLAW_OPEN = 40             # servo angle that opens the gripper
 CLAW_CLOSED = 120          # servo angle that closes the gripper
 
 TIMEOUT = 0.8              # seconds; keep short so a dead network cannot stall gaze
-NO_REPLY_WARN = 4.0        # say "waiting" every time this many seconds pass unanswered
+NO_REPLY_WARN = 2.0        # say "waiting" every time this many seconds pass unanswered
 WAITING_WORD = "waiting"
 
 

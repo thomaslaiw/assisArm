@@ -1,30 +1,90 @@
-# assisArm — eye-tracking assistive robotic arm
+# assisArm — eye-controlled assistive robotic arm
 
-Gaze-controlled robotic arm for people with severe paralysis. This repo currently
-holds the **eye-tracking input layer** only; the arm control comes later.
+A gaze and blink controller that drives a small servo arm. Built for people
+with severe paralysis, where the eyes are the only reliable input.
 
-## What this is
-
-`eye_test.py` reads the eyes from a webcam and turns gaze into five states:
+Everything runs locally. No camera frame ever leaves the machine.
 
 ```
-left   right   up   down   centre
+        [webcam]
+            │
+        eye_test.py            gaze + blinks  →  ArmActions hooks
+            │
+        arm_wifi.py            HTTP over WiFi
+            │
+        ESP8266 (D1 mini)      5 × MG996R servos
 ```
 
-and the four diagonals that fall out of combining them
-(`left up`, `right down`, …).
+---
 
-Everything runs **locally**. No frame, image or landmark ever leaves the machine.
+## What it does
+
+**Gaze directions.** The controller tracks four points every frame:
+
+```
+a = my left pupil        b = my right pupil
+c = nose tip             d = midpoint of a and b
+e = midpoint of the upper eyelids   (shown for diagnostics)
+```
+
+Calibration records the resting offset of `d` from `c`:
+
+```
+dx0 = d.x - c.x          dy0 = d.y - c.y
+```
+
+Because `c` is the nose, the offsets survive the head moving — the nose shifts
+with the pupils, so the difference stays put.
+
+The gaze is then compared with that centre:
+
+| measurement | reads as |
+|---|---|
+| `x > dx0 + LEFT_PX` | left |
+| `x < dx0 - RIGHT_PX` | right |
+| `y < dy0 - UP_PX` | up |
+| horizontal centred **and** eyelids half shut | down |
+
+Holding a direction for `HOLD_SECONDS` speaks it. Keeping the eyes in that same
+zone for another `CONFIRM_SECONDS` speaks `confirm`. Leaving the zone — into
+another direction or back to the centre — wipes the slate, so the next visit
+starts from zero.
+
+**Blink gestures.** Three non-overlapping closure bands:
+
+| closure | meaning |
+|---|---|
+| 0.05 – 0.30 s (short) | confirm / supports the blink-pair gestures |
+| 0.30 – 0.50 s | dead zone, ignored — the width of an ordinary blink |
+| ≥ 0.50 s (long) | three of them toggle the system on or off |
+
+Short blinks come in pairs: two in a row turns fetch mode on (`fetch`), two
+more turn it off (`stop`, then `back` one second later).
+
+**Arm hooks.** Every confirmed event calls a method on an `ArmActions`
+instance, so the hardware plugs in without touching the gaze logic.
+
+---
+
+## Files
+
+| file | purpose |
+|---|---|
+| `eye_test.py` | the controller; silent build, everything drawn on the preview |
+| `eye_test_verbose.py` | same logic with console prints, for tuning thresholds |
+| `arm_wifi.py` | wires the hooks to the ESP8266 over HTTP |
+| `arm_example.py` | minimal example of subclassing `ArmActions` |
+| `firmware/assisArm/assisArm.ino` | ESP8266 firmware: WiFi + web page + HTTP API |
+| `requirements.txt` | pinned Python packages |
+
+---
 
 ## Requirements
 
 - Python 3.11 (3.13 is untested: mediapipe 0.10.14 has no wheels for it)
-- Packages:
-  ```
-  pip install -r requirements.txt
-  ```
+- `pip install -r requirements.txt`
 
-The pins matter:
+The pins are load-bearing:
 
 | package | version | why |
 |---|---|---|
@@ -35,66 +95,92 @@ The pins matter:
 Speech uses the Windows `System.Speech` engine through a short-lived PowerShell
 process — no extra package, no network.
 
-## How detection works
+---
 
-1. MediaPipe Face Mesh with `refine_landmarks=True` gives iris centres.
-2. The image is mirrored first, so the person sees themselves naturally.
-3. Four points are tracked every frame:
+## Hardware
 
-   ```
-   a = my left pupil      b = my right pupil
-   c = nose tip           d = midpoint of a and b
-   ```
+**Controller:** LOLIN(WEMOS) D1 mini, ESP8266, 4 MB flash, CH340 USB-serial.
 
-4. Calibration records the resting offset of `d` from `c`:
+**Actuators:** 5 × MG996R servos.
 
-   ```
-   dx0 = d.x - c.x        dy0 = d.y - c.y
-   ```
+| joint | GPIO | D pin |
+|---|---|---|
+| stand (base rotate) | 14 | D5 |
+| arm vertical 1 | 4 | D2 |
+| arm vertical 2 | 0 | D3 |
+| arm vertical 3 | 16 | D0 |
+| hand (gripper) | 5 | D1 |
 
-   Because `c` is the nose, the offsets survive the head moving — the nose
-   shifts with the pupils, so the difference stays put.
+> **GPIO16 does not work with the `Servo` library** — attaching a servo there
+> crashes the board before `setup()` finishes, leaving it silent on serial. It
+> is currently disabled in the firmware. Move that servo to a free PWM pin
+> (D6/GPIO12 or D7/GPIO13) if a third vertical joint is needed.
 
-5. A **mode switch** decides which axis is live:
+> **Power:** five MG996R draw up to 2.5 A each at stall. They must have their own
+> 5–6 V supply of at least 5 A, with a common ground to the board. Feeding them
+> from the D1 mini's 5 V pin browns out the board and resets it.
 
-   ```
-   HOR (default)
-     d.x - c.x > dx0 + 10  held 1s -> speak "left",  cooldown 1s
-     d.x - c.x < dx0 - 10  held 1s -> speak "right", cooldown 1s
-     |d.x - c.x - dx0| <= 10 held 1s -> switch to VER
+---
 
-   VER
-     d.y - c.y - dy0 < -10 held 1s -> speak "up",    cooldown 1s
-     d.y - c.y - dy0 > +5  held 1s -> speak "down",  cooldown 1s
-     |d.y - c.y - dy0| <= 10 held 1s -> switch to HOR
-   ```
+## Flashing the firmware
 
-   Only the active axis is evaluated, so a diagonal glance cannot fire both
-   directions at once. Returning the eyes to the centre band for one second
-   hands control to the other axis.
+`arduino-cli` with the ESP8266 core:
 
-## Files
+```
+arduino-cli core install esp8266:esp8266
+arduino-cli compile --fqbn esp8266:esp8266:d1_mini_clone firmware/assisArm
+arduino-cli upload  -p COM6 --fqbn esp8266:esp8266:d1_mini_clone firmware/assisArm
+```
 
-| file | purpose |
+The sketch joins a WiFi network in station mode and prints its address on the
+serial console at 115200:
+
+```
+assisArm servo controller
+joining Galaxy A55 5G 78A5
+..............
+ready at http://192.168.133.157
+http server started
+```
+
+Set `USE_STA`, `STA_SSID` and `STA_PASS` at the top of the sketch. If the join
+fails it falls back to its own access point, `ESP8266-ARM` / `88888888`,
+reachable at `http://192.168.4.1`.
+
+### HTTP API
+
+| request | effect |
 |---|---|
-| `eye_test.py` | silent build — no console output except the arm hooks |
-| `eye_test_verbose.py` | same logic with full console prints; use this when tuning thresholds |
-| `arm_example.py` | shows how to drive a robotic arm from the confirmed events |
+| `GET /` | slider page, one per joint |
+| `GET /status` | JSON of every angle |
+| `GET /set?ch=stand&a=90` | set one joint, 10–170° |
+| `GET /step?ch=stand&d=10` | nudge one joint |
+| `GET /home` | every joint to its home angle |
 
-## Arm hooks
+---
 
-Every confirmed event calls a method on an `ArmActions` instance:
+## Running
 
-| hook | fires when |
-|---|---|
-| `on_left` `on_right` `on_up` `on_down` | that direction was confirmed |
-| `on_centre` | the eyes came back to rest |
-| `on_fetch` | fetch mode started |
-| `on_stop` | fetch mode ended |
-| `on_back` | one second after `on_stop` |
-| `on_system_on` `on_system_off` | triple long blink toggled power |
+**Just the eye tracker:**
 
-To drive hardware, subclass it and pass the instance to `main()`:
+```
+python eye_test.py
+```
+
+Calibrate by looking straight ahead when prompted, then hold a direction.
+
+**With the arm:**
+
+```
+python arm_wifi.py
+python arm_wifi.py --host 192.168.133.157 --step 10
+```
+
+`arm_wifi.py` checks the arm before calibrating and reports the address it
+found. While the arm is silent it speaks `waiting` every four seconds, and
+stops as soon as contact returns.
+
+**Wiring your own arm:**
 
 ```python
 from eye_test import ArmActions, main
@@ -108,65 +194,57 @@ class MyArm(ArmActions):
 main(MyArm())
 ```
 
-The default class only prints, so a stock run is a readable trace of what the
-arm would have done.
-
-## Usage
-
-Calibrate (look straight ahead when prompted) — with the silent build everything
-appears in the preview window:
-
-```
-python eye_test.py
-```
-
-The verbose build prints the resting offset:
-
-```
-resting offset d-c: dx0=-232.5  dy0=-38.2 (90 frames)
-```
-
-Reuse those numbers so calibration is skipped:
-
-```
-python eye_test.py --dx0 -232.5 --dy0 -38.2
-```
-
-| flag | meaning |
+| hook | fires when |
 |---|---|
-| `--dx0 --dy0` | resting offset of the pupil midpoint from the nose |
-| `--left-px` | travel needed to count as left (default 10) |
-| `--right-px` | travel needed to count as right (default 10) |
-| `--up-px` | travel needed to count as up (default 10) |
-| `--down-px` | travel needed to count as down (default 5) |
-| `--center-px` | band that hands control to the other axis (default 10) |
-| `--flip-y` | invert up/down if the camera orientation needs it |
-| `--plain` | raw camera image only, no overlay at all |
-| `--no-preview` | run headless (silent build: no output whatsoever) |
-| `--calib` | force calibration even when offsets are given |
+| `on_left` `on_right` `on_up` `on_down` | that direction was confirmed |
+| `on_centre` | the eyes came back to rest |
+| `on_fetch` / `on_stop` / `on_back` | fetch mode changes |
+| `on_system_on` / `on_system_off` | triple long blink toggled power |
 
-Keys while running:
+---
+
+## Tuning
+
+All thresholds are command-line flags; `eye_test.py --help` lists them.
+
+| flag | default | effect |
+|---|---|---|
+| `--left-px` `--right-px` | 12 | travel needed for left/right |
+| `--up-px` `--down-px` | 20 | travel needed for up/down |
+| `--center-px` | 10 | band that counts as "no direction" |
+| `--hold` | 1.0 | hold a direction this long to hear it |
+| `--confirm-after` | 1.0 | keep holding this much longer to hear `confirm` |
+| `--blink-gap` | 2.0 | two short blinks must be this close together |
+| `--ear-open` `--ear-closed` | 0.150 / 0.090 | eye aspect ratio bands |
+| `--short-min` `--short-max` `--long-min` | 0.05 / 0.30 / 0.50 | blink bands, seconds |
+| `--dx0` `--dy0` | — | reuse a previous calibration |
+| `--flip-y` | off | invert up/down if the camera orientation needs it |
+| `--plain` | off | raw camera image, no overlay |
+| `--no-preview` | off | headless |
+
+**Calibration notes.** Sit about 40–50 cm from the camera so the face fills
+roughly a third of the frame. Keep the head straight — a tilted head shifts the
+two eyes vertically and corrupts the up/down reading. Recalibrate whenever the
+seating position, distance or lighting changes.
+
+---
+
+## Keys
 
 | key | action |
 |---|---|
-| `ENTER` | save the raw frame to `saved_frames\` and print that frame's numbers |
+| `ENTER` | save the raw frame to `saved_frames\` |
 | `Q` / `ESC` | quit |
 
-Saved frames are the raw camera image — debug markers are drawn on screen only
-and never written into the files.
+Saved frames are the raw camera image; the debug markers are drawn on screen
+only and never written into the files. `saved_frames\` is gitignored.
 
-## Calibration notes
+---
 
-- Sit about 40–50 cm from the camera so the face fills roughly a third of the frame.
-- Keep the head straight; a tilted head shifts the two eyes vertically and
-  corrupts the up/down reading.
-- Recalibrate whenever the seating position, distance or lighting changes.
-- `--dx` up for less sensitivity, down for more.
+## Status
 
-## Roadmap
+Working: 4-direction gaze, confirm, blink gestures, power toggle, WiFi arm
+control over HTTP, arm hooks.
 
-- [x] 5-state gaze detection with speech
-- [ ] Dwell selection on physical objects (scene camera)
-- [ ] Map gaze to arm coordinates (hand-eye calibration)
-- [ ] Arm control: open / move / grip / release / return home
-- [ ] Voice + gaze confirmation before any motion
+Open: mapping up/down/back onto the remaining joints, and freeing a PWM pin for
+the third vertical servo.

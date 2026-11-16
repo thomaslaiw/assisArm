@@ -86,11 +86,11 @@ CALIB_WAIT_SECONDS = 2.0
 CALIB_SECONDS = 3.0
 
 # ---- gaze thresholds, pixels of travel from the calibrated centre
-LEFT_PX = 12.0
-RIGHT_PX = 12.0
-UP_PX = 20.0
-DOWN_PX = 20.0
-CENTER_PX = 10.0          # inside this band counts as no direction
+LEFT_PX = 8.0
+RIGHT_PX = 8.0
+UP_PX = 15.0
+DOWN_PX = 10.0
+CENTER_PX = 8.0          # inside this band counts as no direction
 
 # ---- blink bands, seconds
 SHORT_MIN = 0.05
