@@ -588,8 +588,23 @@ def main(actions=None):
                 if short_pair_pending and (now - last_short_at) > BLINK_GAP:
                     short_pair_pending = False
 
+                # -------------------------------- fetch: a closure stops it
+                # While fetching, nothing else is listening: no power toggle and
+                # no blink pairs. The only signal is the eyes closing.
+                if fetch_mode and eyes_closed and sys_on:
+                    speak("stop")
+                    actions.on_stop()
+                    back_due_at = now + STOP_GAP
+                    fetch_mode = False
+                    status = "stop (eyes closed)"
+                    direction, dir_start = "", 0.0
+                    spoken_direction = ""
+                    long_count = 0
+                    short_pair_pending = False
+                    close_start = 0.0
+
                 # -------------------------------- long blinks: system on/off
-                if long_blink:
+                if long_blink and not fetch_mode:
                     long_count += 1
                     last_long_at = now
                     if long_count >= 3:
@@ -612,20 +627,13 @@ def main(actions=None):
                     status = "back"
 
                 # -------------------------------- short blink pairs: fetch
-                if short_blink and sys_on and not speaker_busy(now):
+                if short_blink and sys_on and not fetch_mode and not speaker_busy(now):
                     if short_pair_pending:
                         short_pair_pending = False
-                        if fetch_mode:
-                            speak("stop")
-                            actions.on_stop()
-                            back_due_at = now + STOP_GAP
-                            fetch_mode = False
-                            status = "stop"
-                        else:
-                            speak("fetch")
-                            actions.on_fetch()
-                            fetch_mode = True
-                            status = "fetch"
+                        speak("fetch")
+                        actions.on_fetch()
+                        fetch_mode = True
+                        status = "fetch"
                         direction, dir_start = "", 0.0
                         spoken_direction = ""
                     else:
