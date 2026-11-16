@@ -77,8 +77,8 @@ CALIB_SECONDS = 3.0
 # ---- is 1.000, so 0.12 means the iris travelled 12% of the eye width.
 LEFT_R = 0.12
 RIGHT_R = 0.12
-UP_R = 0.12
-DOWN_R = 0.06             # down needs less travel than up: looking down is
+UP_R = 0.15
+DOWN_R = 0.02             # down needs less travel than up: looking down is
                           # constrained by the lower lid, so the iris barely moves
 CENTER_R = 0.05           # inside this band counts as no direction
 
@@ -87,15 +87,15 @@ CENTER_R = 0.05           # inside this band counts as no direction
 DOWN_MIN_LID = 0.15
 
 # ---- blink bands, seconds
-SHORT_MIN = 0.05
-SHORT_MAX = 0.30
+SHORT_MIN = 0.005
+SHORT_MAX = 0.10
 LONG_MIN = 0.50
 
 # ---- eye aspect ratio, decides open or shut
 EAR_OPEN = 0.150
-EAR_CLOSED = 0.090
+EAR_CLOSED = 0.1
 
-VIEW_W, VIEW_H = 1280, 720
+VIEW_W, VIEW_H = 1920, 1080
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 FRAME_DIR = os.path.join(PROJECT_DIR, "saved_frames")
 
@@ -394,7 +394,7 @@ def save_frame(frame):
 
 
 CONFIRM_MULTIPLIER = {
-    "down": 2.0,          # a downward glance is harder to hold, so be patient
+    "down": 1.0,          # a downward glance is harder to hold, so be patient
 }
 
 
@@ -707,6 +707,12 @@ def main(actions=None):
         pass
 
     finally:
+        # whichever way we leave - quit key, window close, Ctrl+C - send the
+        # arm home so it is never left holding an awkward pose
+        try:
+            actions.on_back()
+        except Exception as e:
+            print(f"[arm] could not send home on exit: {e}")
         cap.release()
         if show_preview:
             cv2.destroyAllWindows()

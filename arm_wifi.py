@@ -113,7 +113,8 @@ class WifiArm(ArmActions):
         print("[arm] down: not wired yet")
 
     def on_back(self):
-        print("[arm] back: not wired yet")
+        print("[arm] back -> home")
+        self._get("/home")
 
     def on_centre(self):
         pass          # too noisy to send to the arm
