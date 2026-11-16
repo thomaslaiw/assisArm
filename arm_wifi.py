@@ -70,12 +70,13 @@ class WifiArm(ArmActions):
 
     # ------------------------------------------------------------ hooks
     def on_left(self):
-        print(f"[arm] stand left  {self.step:+d}")
-        self._step_channel("stand", +self.step)
+        # the base servo is mounted mirrored, so a positive step turns it right
+        print(f"[arm] left  -> stand {self.step:+d}")
+        self._step_channel("stand", -self.step)
 
     def on_right(self):
-        print(f"[arm] stand right {self.step:+d}")
-        self._step_channel("stand", -self.step)
+        print(f"[arm] right -> stand {self.step:+d}")
+        self._step_channel("stand", +self.step)
 
     def on_fetch(self):
         print(f"[arm] claw open -> {CLAW_OPEN}")
