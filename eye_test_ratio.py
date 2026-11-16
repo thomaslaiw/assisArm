@@ -78,8 +78,13 @@ CALIB_SECONDS = 3.0
 LEFT_R = 0.12
 RIGHT_R = 0.12
 UP_R = 0.12
-DOWN_R = 0.12
+DOWN_R = 0.06             # down needs less travel than up: looking down is
+                          # constrained by the lower lid, so the iris barely moves
 CENTER_R = 0.05           # inside this band counts as no direction
+
+# down is only accepted while the lids are still reasonably open; anything
+# narrower than this fraction of the calibrated gap is a blink, not a look
+DOWN_MIN_LID = 0.15
 
 # ---- blink bands, seconds
 SHORT_MIN = 0.05
@@ -331,8 +336,10 @@ class RestCalibration:
         self.record_start = None
         self.hs = []
         self.vs = []
+        self.gaps = []
         self.h0 = None
         self.v0 = None
+        self.gap0 = None
 
     def needs_prompt(self):
         return self.prompt_at is None
@@ -353,17 +360,27 @@ class RestCalibration:
         if ratios is not None:
             self.hs.append(ratios["h"])
             self.vs.append(ratios["v"])
+            self.gaps.append(ratios["gap"])
 
         if progress >= 1.0 and self.hs:
             hs = sorted(self.hs)
             vs = sorted(self.vs)
             self.h0 = hs[len(hs) // 2]
             self.v0 = vs[len(vs) // 2]
+            if self.gaps:
+                gs = sorted(self.gaps)
+                self.gap0 = gs[len(gs) // 2]
 
         return "RECORDING CENTRE", min(1.0, progress)
 
     def done(self):
         return self.h0 is not None and self.v0 is not None
+
+    def lid_ok(self, ratios):
+        """True while the lids are open enough for a downward look to count."""
+        if ratios is None or not self.gap0:
+            return True
+        return ratios["gap"] >= self.gap0 * DOWN_MIN_LID
 
 
 def save_frame(frame):
@@ -376,8 +393,26 @@ def save_frame(frame):
         return None
 
 
-def direction_of(dh, dv, flip_y):
-    """Pick the dominant axis. Returns '', 'left', 'right', 'up' or 'down'."""
+CONFIRM_MULTIPLIER = {
+    "down": 2.0,          # a downward glance is harder to hold, so be patient
+}
+
+
+def confirm_time(direction, base=None):
+    """How long to keep holding before speaking confirm, per direction."""
+    if base is None:
+        base = CONFIRM_SECONDS
+    return base * CONFIRM_MULTIPLIER.get(direction, 1.0)
+
+
+def direction_of(dh, dv, flip_y, lid_ok=True):
+    """
+    Pick the dominant axis. Returns '', 'left', 'right', 'up' or 'down'.
+
+    lid_ok is False when the eyelids have nearly met, in which case "down" is
+    suppressed: a blink moves the iris downward, so without this guard every
+    blink would read as a downward glance.
+    """
     if flip_y:
         dv = -dv
 
@@ -390,7 +425,7 @@ def direction_of(dh, dv, flip_y):
     vert = ""
     if dv < -UP_R:
         vert = "up"
-    elif dv > DOWN_R:
+    elif dv > DOWN_R and lid_ok:
         vert = "down"
 
     if horiz and vert:
@@ -597,7 +632,8 @@ def main(actions=None):
                 dv = ratios["v"] - cal.v0
 
                 if sys_on and not eyes_closed:
-                    new_dir = direction_of(dh, dv, args.flip_y)
+                    new_dir = direction_of(dh, dv, args.flip_y,
+                                           cal.lid_ok(ratios))
                 else:
                     new_dir = ""
 
@@ -623,7 +659,7 @@ def main(actions=None):
 
                 elif (direction and direction == spoken_direction
                       and not speaker_busy(now)
-                      and held >= args.hold + args.confirm_after):
+                      and held >= args.hold + confirm_time(direction)):
                     speak("confirm")
                     status = f"{direction} confirmed"
                     hook = DIRECTION_HOOKS.get(direction)
