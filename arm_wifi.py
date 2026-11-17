@@ -23,6 +23,8 @@ up / down / back are left as no-ops until the arm's geometry is settled.
 """
 
 import argparse
+import argparse
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -31,7 +33,9 @@ from eye_test import ArmActions, main
 
 DEFAULT_HOST = "192.168.151.157"
 DEFAULT_STEP = 10          # degrees per confirmed left/right
-ARM_STEP = 4               # degrees per confirmed up/down, per joint
+POSE_STEP = 5              # per confirmed up/down, in pose units
+FETCH_STEP = 5             # per fetch tick while extending
+FETCH_TICK = 0.3           # seconds between extend calls during a fetch
 CLAW_OPEN = 40             # servo angle that opens the gripper
 CLAW_CLOSED = 120          # servo angle that closes the gripper
 
@@ -50,6 +54,8 @@ class WifiArm(ArmActions):
         self.last_error = ""
         self.unanswered_since = None   # when contact was lost; None = healthy
         self.last_warning = 0.0        # when we last said "waiting"
+        self._fetch_stop = threading.Event()   # set to end the extend loop
+        self._fetch_thread = None
 
     # ------------------------------------------------------------ transport
     def _get(self, path):
@@ -88,6 +94,34 @@ class WifiArm(ArmActions):
     def _set_channel(self, channel, angle):
         self._get(f"/set?ch={channel}&a={angle}")
 
+    def _pose(self, path):
+        return self._get(path)
+
+    def _stop_fetch_loop(self):
+        """Tell the extend loop to finish, and wait for it."""
+        self._fetch_stop.set()
+        if self._fetch_thread is not None:
+            self._fetch_thread.join(timeout=1.5)
+            self._fetch_thread = None
+
+    def _run_fetch_loop(self):
+        """
+        Walk f down toward 0 while the fetch is active.
+
+        The board clamps f at 0, so the loop simply stops when the pose stops
+        changing rather than needing to know the limit itself.
+        """
+        last = None
+        while not self._fetch_stop.is_set():
+            self._get(f"/extend?d={FETCH_STEP}")
+            now_pose = self._get("/pose")
+            if now_pose is not None and now_pose == last:
+                print("[arm] fully extended")
+                break
+            last = now_pose
+            if self._fetch_stop.wait(FETCH_TICK):
+                break
+
     # ------------------------------------------------------------ hooks
     def on_left(self):
         # the base servo is mounted mirrored, so a positive step turns it right
@@ -99,32 +133,38 @@ class WifiArm(ArmActions):
         self._step_channel("stand", +self.step)
 
     def on_fetch(self):
-        print(f"[arm] claw open -> {CLAW_OPEN}")
+        """Open the claw, then keep reaching out until the fetch is stopped."""
+        print(f"[arm] fetch -> claw {CLAW_OPEN}, extending every {FETCH_TICK}s")
         self._set_channel("hand", CLAW_OPEN)
 
+        self._stop_fetch_loop()                 # in case one was still running
+        self._fetch_stop.clear()
+        self._fetch_thread = threading.Thread(
+            target=self._run_fetch_loop, daemon=True)
+        self._fetch_thread.start()
+
     def on_stop(self):
-        print(f"[arm] claw close -> {CLAW_CLOSED}")
+        """End the reach and close the claw."""
+        print(f"[arm] stop -> claw {CLAW_CLOSED}, extension halted")
+        self._stop_fetch_loop()
         self._set_channel("hand", CLAW_CLOSED)
 
     def on_up(self):
-        # arm1 climbs by turning up, arm2 climbs by turning down: the two
-        # joints are mounted in opposition
-        print(f"[arm] up   arm1 {ARM_STEP:+d}  arm2 {-ARM_STEP:+d}")
-        self._step_channel("arm1", +ARM_STEP)
-        self._step_channel("arm2", -ARM_STEP)
+        print(f"[arm] up   v -{POSE_STEP}")
+        self._pose(f"/raise?d={POSE_STEP}")
 
     def on_down(self):
-        print(f"[arm] down arm1 {-ARM_STEP:+d}  arm2 {+ARM_STEP:+d}")
-        self._step_channel("arm1", -ARM_STEP)
-        self._step_channel("arm2", +ARM_STEP)
+        print(f"[arm] down v +{POSE_STEP}")
+        self._pose(f"/lower?d={POSE_STEP}")
 
     def on_back(self):
         # nothing wired yet: the back gesture still needs a physical decision
         print("[arm] back (no action yet)")
 
     def on_shutdown(self):
-        # the program is closing: every joint goes home
+        # the program is closing: stop any reach in flight, then park
         print("[arm] shutdown -> home")
+        self._stop_fetch_loop()
         self._get("/home")
 
     def on_centre(self):
@@ -137,6 +177,7 @@ class WifiArm(ArmActions):
         # switching the system off parks the arm, so it does not sit in a
         # half-extended pose while nothing is watching the eyes
         print("[arm] system off -> home")
+        self._stop_fetch_loop()
         self._get("/home")
 
 

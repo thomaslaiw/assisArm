@@ -15,8 +15,8 @@
  * The three vertical joints are driven by one pose, not by raw angles.
  * Two numbers describe everything:
  *
- *   f = how far the arm is extended    0 (folded) .. 40 (fully out)
- *   v = how low the arm is             0 (top)    .. 35 (bottom)
+ *   f = how far the arm is folded      0 (fully out) .. 40 (folded in)
+ *   v = how low the arm is             0 (top)       .. 30 (bottom)
  *
  * and the servo angles follow from them:
  *
@@ -35,8 +35,8 @@
  *   GET /pose                 just f and v
  *
  *   pose commands (preferred - they keep the joints coordinated)
- *   GET /extend?d=5           f += d   (clamped 0..40)
- *   GET /retract?d=5          f -= d
+ *   GET /extend?d=5           f -= d   (arm reaches out)
+ *   GET /retract?d=5          f += d   (arm folds back)
  *   GET /lower?d=5            v += d   (clamped 0..35)
  *   GET /raise?d=5            v -= d
  *   GET /reset                f = 0, v = 0, stand and hand home
@@ -249,15 +249,15 @@ void handlePose() {
 }
 
 void handleExtend() {
-  poseF += server.arg("d").toInt();
-  if (poseF == 0) poseF = 5;                 // d missing: step by 5
+  // extending the arm means folding f down toward 0
+  poseF -= server.arg("d").toInt();
   applyPose();
   server.send(200, "application/json", poseJson());
 }
 
 void handleRetract() {
-  poseF -= server.arg("d").toInt();
-  if (poseF == 0) poseF = -5;
+  // folding back in means raising f toward F_MAX
+  poseF += server.arg("d").toInt();
   applyPose();
   server.send(200, "application/json", poseJson());
 }
