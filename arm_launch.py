@@ -22,8 +22,9 @@ import sys
 import urllib.error
 import urllib.request
 
-SCAN_TIMEOUT = 0.6
-SCAN_WORKERS = 96
+SCAN_TIMEOUT = 1.0
+SCAN_WORKERS = 32          # too many at once and Windows drops connections
+SCAN_PASSES = 2            # a live board can still be missed on a busy network
 PROBE_PATH = "/status"
 EXPECTED_KEYS = ("stand", "arm1", "hand")
 
@@ -68,13 +69,16 @@ def find_arm(quiet=False):
         print(f"scanning {sub}.0/24 for the arm...")
 
     addresses = [f"{sub}.{i}" for i in range(1, 255)]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
-        for ip, body in zip(addresses, ex.map(probe, addresses)):
-            if body is not None:
-                if not quiet:
-                    print(f"found arm at {ip}")
-                    print(f"  {body}")
-                return ip, body
+    for attempt in range(1, SCAN_PASSES + 1):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
+            for ip, body in zip(addresses, ex.map(probe, addresses)):
+                if body is not None:
+                    if not quiet:
+                        print(f"found arm at {ip}")
+                        print(f"  {body}")
+                    return ip, body
+        if attempt < SCAN_PASSES and not quiet:
+            print(f"  nothing on pass {attempt}, retrying...")
 
     if not quiet:
         print("no arm answered on this network.")
