@@ -71,6 +71,9 @@ instance, so hardware plugs in without touching the gaze logic.
 | `eye_test_ratio.py` | ratio tracker for the higher resolution camera |
 | `eye_test_verbose.py` | pixel tracker with console prints, for tuning thresholds |
 | `arm_wifi.py` | wires the hooks to the ESP8266 over HTTP |
+| `arm_launch.py` | finds the board on the network, then starts one of the above |
+| `arm_web.py` | local web remote with direction buttons |
+| `run_arm.bat` `run_web.bat` `find_arm.bat` | double-click shortcuts |
 | `arm_example.py` | minimal example of subclassing `ArmActions` |
 | `firmware/assisArm/assisArm.ino` | ESP8266 firmware: WiFi + web page + HTTP API |
 | `requirements.txt` | pinned Python packages |
@@ -163,7 +166,29 @@ reachable at `http://192.168.4.1`.
 
 ## Running
 
-**Just the eye tracker:**
+**The easy way.** Double-click one of the batch files in the project folder:
+
+| file | what it does |
+|---|---|
+| `run_arm.bat` | finds the board, then runs the eye tracker with arm control |
+| `run_web.bat` | finds the board, then serves the button page |
+| `find_arm.bat` | just reports where the board is |
+
+The hotspot hands out a **different subnet every time it restarts**, so the
+board's address moves. `arm_launch.py` discovers which /24 this PC is on,
+sweeps it for a board that answers `/status`, and passes the address on. No
+editing, no scanning by hand.
+
+Same thing from a terminal:
+
+```
+python arm_launch.py            # find, then eye tracker
+python arm_launch.py --web      # find, then button page
+python arm_launch.py --find     # just report the address
+python arm_launch.py --host 192.168.151.157   # skip the scan
+```
+
+**Just the eye tracker, no arm:**
 
 ```
 python eye_test.py
@@ -175,9 +200,11 @@ Calibrate by looking straight ahead when prompted, then hold a direction.
 **With the arm:**
 
 ```
-python arm_wifi.py
-python arm_wifi.py --host 192.168.244.157 --step 10
+python arm_wifi.py                       # uses the address baked into the file
+python arm_wifi.py --host 192.168.151.157 --step 10
 ```
+
+or, better, `python arm_launch.py` so the address is found rather than typed.
 
 `arm_wifi.py` checks the arm before calibrating and reports the address it
 found. While the arm is silent it speaks `waiting` every four seconds and
