@@ -51,10 +51,10 @@ struct Channel {
 
 Channel channels[] = {
   //  name      pin            angle  min  max  home
-  { "stand",   14,            90,    10, 170,  90 },
-  { "arm1",     4,            90,    10, 170,  90 },
-  { "arm2",     0,            90,    10, 170,  90 },
-  // { "arm3",    16,            90,    10, 170,  90 },   // GPIO16 disabled for diagnosis
+  { "stand",   12,            90,    10, 170,  90 },
+  { "arm1",     4,           150,    10, 170, 150 },   // home +60 from centre
+  { "arm2",     0,            60,    10, 170,  60 },   // home -30 from centre
+  { "arm3",    14,            60,    10, 170,  60 },   // home -30 from centre
   { "hand",     5,            90,    10, 170,  90 },
 };
 const int CH_COUNT = sizeof(channels) / sizeof(channels[0]);
@@ -114,7 +114,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 <div id="list"></div>
 <button id="home" onclick="fetch('/home')">home all</button>
 <script>
-const CH = ["stand","arm1","arm2","hand"];
+const CH = ["stand","arm1","arm2","arm3","hand"];
 const list = document.getElementById('list');
 CH.forEach(name => {
   const d = document.createElement('div');

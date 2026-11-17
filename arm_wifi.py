@@ -29,8 +29,9 @@ import urllib.request
 
 from eye_test import ArmActions, main
 
-DEFAULT_HOST = "192.168.244.157"
-DEFAULT_STEP = 10          # degrees per confirmed direction
+DEFAULT_HOST = "192.168.151.157"
+DEFAULT_STEP = 10          # degrees per confirmed left/right
+ARM_STEP = 4               # degrees per confirmed up/down, per joint
 CLAW_OPEN = 40             # servo angle that opens the gripper
 CLAW_CLOSED = 120          # servo angle that closes the gripper
 
@@ -105,12 +106,16 @@ class WifiArm(ArmActions):
         print(f"[arm] claw close -> {CLAW_CLOSED}")
         self._set_channel("hand", CLAW_CLOSED)
 
-    # deliberately unimplemented for now
     def on_up(self):
-        print("[arm] up: not wired yet")
+        # both vertical joints climb together
+        print(f"[arm] up   arm1 arm2 {ARM_STEP:+d}")
+        self._step_channel("arm1", +ARM_STEP)
+        self._step_channel("arm2", +ARM_STEP)
 
     def on_down(self):
-        print("[arm] down: not wired yet")
+        print(f"[arm] down arm1 arm2 {-ARM_STEP:+d}")
+        self._step_channel("arm1", -ARM_STEP)
+        self._step_channel("arm2", -ARM_STEP)
 
     def on_back(self):
         # nothing wired yet: the back gesture still needs a physical decision
