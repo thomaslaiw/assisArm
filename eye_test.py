@@ -89,8 +89,8 @@ CALIB_SECONDS = 3.0
 # ---- gaze thresholds, pixels of travel from the calibrated centre
 LEFT_PX = 8.0
 RIGHT_PX = 8.0
-UP_PX = 15.0
-DOWN_PX = 10.0
+UP_PX = 10.0
+DOWN_PX = 5.0
 CENTER_PX = 8.0          # inside this band counts as no direction
 
 # ---- blink bands, seconds
