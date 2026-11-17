@@ -52,9 +52,9 @@ struct Channel {
 Channel channels[] = {
   //  name      pin            angle  min  max  home
   { "stand",   12,            90,    10, 170,  90 },
-  { "arm1",     4,           150,    10, 170, 150 },   // home +60 from centre
-  { "arm2",     0,            60,    10, 170,  60 },   // home -30 from centre
-  { "arm3",    14,            60,    10, 170,  60 },   // home -30 from centre
+  { "arm1",     4,            90,     0,  90,  90 },   // 90 = top,  0 = bottom
+  { "arm2",     0,            30,    30, 120,  30 },   // 30 = top, 120 = bottom
+  { "arm3",    14,            30,    10, 170,  30 },   // sliders only, arrows leave it
   { "hand",     5,            90,    10, 170,  90 },
 };
 const int CH_COUNT = sizeof(channels) / sizeof(channels[0]);

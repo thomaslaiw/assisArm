@@ -107,15 +107,16 @@ class WifiArm(ArmActions):
         self._set_channel("hand", CLAW_CLOSED)
 
     def on_up(self):
-        # both vertical joints climb together
-        print(f"[arm] up   arm1 arm2 {ARM_STEP:+d}")
+        # arm1 climbs by turning up, arm2 climbs by turning down: the two
+        # joints are mounted in opposition
+        print(f"[arm] up   arm1 {ARM_STEP:+d}  arm2 {-ARM_STEP:+d}")
         self._step_channel("arm1", +ARM_STEP)
-        self._step_channel("arm2", +ARM_STEP)
+        self._step_channel("arm2", -ARM_STEP)
 
     def on_down(self):
-        print(f"[arm] down arm1 arm2 {-ARM_STEP:+d}")
+        print(f"[arm] down arm1 {-ARM_STEP:+d}  arm2 {+ARM_STEP:+d}")
         self._step_channel("arm1", -ARM_STEP)
-        self._step_channel("arm2", -ARM_STEP)
+        self._step_channel("arm2", +ARM_STEP)
 
     def on_back(self):
         # nothing wired yet: the back gesture still needs a physical decision

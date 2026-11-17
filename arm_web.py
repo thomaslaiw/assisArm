@@ -119,11 +119,12 @@ def arm_get(path):
 def do_action(action):
     """Translate a button press into one or more arm calls."""
     if action == "up":
+        # arm1 up is +, arm2 up is -: the joints are mounted in opposition
         arm_get("/step?ch=arm1&d=+{}".format(STEP_ARM))
-        return arm_get("/step?ch=arm2&d=+{}".format(STEP_ARM))
+        return arm_get("/step?ch=arm2&d=-{}".format(STEP_ARM))
     if action == "down":
         arm_get("/step?ch=arm1&d=-{}".format(STEP_ARM))
-        return arm_get("/step?ch=arm2&d=-{}".format(STEP_ARM))
+        return arm_get("/step?ch=arm2&d=+{}".format(STEP_ARM))
     if action == "left":
         return arm_get("/step?ch=stand&d=-{}".format(STEP_SIDE))
     if action == "right":
