@@ -121,6 +121,7 @@ class ArmActions:
         on_centre                              the eyes came back to rest
         on_fetch / on_stop / on_back           fetch mode changes
         on_system_on / on_system_off           power toggle
+        on_shutdown                            the program is closing
 
     The defaults only print, so a stock run tells you what the arm would do.
     """
@@ -154,6 +155,9 @@ class ArmActions:
 
     def on_system_off(self):
         print("[arm] SYSTEM OFF")
+
+    def on_shutdown(self):
+        print("[arm] SHUTDOWN - program closing")
 
 
 DIRECTION_HOOKS = {
@@ -816,6 +820,11 @@ def main(actions=None):
         pass
 
     finally:
+        # the program is closing, however it was closed: let the arm park
+        try:
+            actions.on_shutdown()
+        except Exception as e:
+            print(f"[arm] could not park on exit: {e}")
         cap.release()
         if show_preview:
             cv2.destroyAllWindows()
